@@ -350,6 +350,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	}
 
 	world->enableSleep = def->enableSleep;
+	world->enableSensorUpdates = true;
 	world->locked = false;
 	world->enableWarmStarting = true;
 	world->enableContinuous = def->enableContinuous;
@@ -1149,11 +1150,19 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 		world->activeTaskCount -= 1;
 	}
 
-	// Update sensors
+	// Update sensors. Applications stepping multiple times per rendered frame can
+	// disable this for all but one step (b3World_EnableSensorUpdates): the overlap
+	// sets are stateful, so skipped steps simply deliver their begin/end events on
+	// the next enabled step.
+	if ( world->enableSensorUpdates )
 	{
 		uint64_t sensorTicks = b3GetTicks();
 		b3OverlapSensors( world );
 		world->profile.sensors = b3GetMilliseconds( sensorTicks );
+	}
+	else
+	{
+		world->profile.sensors = 0.0f;
 	}
 
 	world->profile.step = b3GetMilliseconds( stepTicks );
@@ -1973,6 +1982,23 @@ bool b3Contact_IsValid( b3ContactId id )
 	B3_ASSERT( contact->contactId == contactId );
 
 	return id.generation == contact->generation;
+}
+
+void b3World_EnableSensorUpdates( b3WorldId worldId, bool flag )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	world->enableSensorUpdates = flag;
+}
+
+bool b3World_IsSensorUpdateEnabled( b3WorldId worldId )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	return world->enableSensorUpdates;
 }
 
 void b3World_EnableSleeping( b3WorldId worldId, bool flag )

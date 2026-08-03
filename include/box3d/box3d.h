@@ -128,6 +128,15 @@ B3_API void b3World_CollideMover( b3WorldId worldId, b3Pos origin, const b3Capsu
 /// @see b3WorldDef
 B3_API void b3World_EnableSleeping( b3WorldId worldId, bool flag );
 
+/// Enable/disable the sensor overlap update for subsequent steps. Applications stepping
+/// several times per rendered frame can run sensors on only one of those steps: overlap
+/// sets are stateful, so steps skipped this way deliver their begin/end events on the
+/// next enabled step. Default is true (sensors update every step).
+B3_API void b3World_EnableSensorUpdates( b3WorldId worldId, bool flag );
+
+/// Are sensor updates enabled?
+B3_API bool b3World_IsSensorUpdateEnabled( b3WorldId worldId );
+
 /// Is body sleeping enabled?
 B3_API bool b3World_IsSleepingEnabled( b3WorldId worldId );
 
