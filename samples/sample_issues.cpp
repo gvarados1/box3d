@@ -1302,3 +1302,413 @@ public:
 
 static int sampleSlideTwistOffCenterShape =
 	RegisterSample( "Issues", "Slide Twist Off Center Shape", SlideTwistOffCenterShape::Create );
+
+
+// Ghost collisions at the seam between two flush colliders.
+//
+// A conveyor run is built from tiles that each carry their own collider, butted together with
+// their top faces exactly coplanar. An item is driven along +z by tangentVelocity and should
+// glide across the seams. Instead it can be launched upward, because a shape resting on one tile
+// sinks by the solver's residual penetration and then meets the leading edge of the next tile.
+// Two things go wrong there:
+//
+//   1. The next tile's leading face becomes a curb. A tenth of a millimetre of overlap is enough
+//      to build a full face manifold that stops a 2 m/s item dead, and tips it.
+//   2. A shape with chamfered bottom edges grazes the next tile's top corner. SAT correctly
+//      reports the closest feature pair as chamfer face versus corner, several millimetres apart
+//      at 45 degrees. Enforcing that speculatively rotates sliding velocity into vertical
+//      velocity, so the item jumps.
+//
+// Every walkable vertex is at y = 0, so there is nothing to climb and nothing to trip on. Any
+// upward velocity while grounded is a ghost collision. Compare belt types: a single merged
+// collider has no seam and never launches, which isolates the seam as the cause.
+class ConveyorSeamGhost : public Sample
+{
+public:
+	enum BeltType
+	{
+		e_separateHulls = 0,
+		e_mergedHull,
+		e_separateMeshes,
+		e_mergedMesh,
+		e_mixed,
+	};
+
+	enum ItemType
+	{
+		e_boxItem = 0,
+		e_chamferItem,
+		e_sphereItem,
+	};
+
+	static constexpr int m_tileCount = 10;
+	static constexpr float m_tileLength = 1.0f;
+	static constexpr float m_tileHalfWidth = 0.472f;
+	static constexpr float m_tileHalfDepth = 0.0795f;
+	static constexpr float m_itemHalfHeight = 0.3f;
+	static constexpr float m_chamfer = 0.05f;
+	static constexpr float m_launchThreshold = 0.05f;
+	static constexpr int m_markerCapacity = 64;
+
+	explicit ConveyorSeamGhost( SampleContext* context )
+		: Sample( context )
+	{
+		if ( m_context->restart == false )
+		{
+			m_camera->SetView( 75.0f, 18.0f, 7.0f, { 0.0f, 0.0f, 5.0f } );
+		}
+
+		Build();
+	}
+
+	~ConveyorSeamGhost() override
+	{
+		Clear();
+	}
+
+	// Convex hull of the six inset face rectangles: a box with all twelve edges chamfered, which
+	// is what a crate collision mesh looks like once it has been run through hull generation.
+	b3HullData* CreateChamferBoxHull( float h, float c )
+	{
+		b3Vec3 points[24];
+		int n = 0;
+		float i = h - c;
+
+		for ( int s = -1; s <= 1; s += 2 )
+		{
+			float f = (float)s * h;
+
+			points[n++] = { f, i, i };
+			points[n++] = { f, i, -i };
+			points[n++] = { f, -i, i };
+			points[n++] = { f, -i, -i };
+
+			points[n++] = { i, f, i };
+			points[n++] = { i, f, -i };
+			points[n++] = { -i, f, i };
+			points[n++] = { -i, f, -i };
+
+			points[n++] = { i, i, f };
+			points[n++] = { i, -i, f };
+			points[n++] = { -i, i, f };
+			points[n++] = { -i, -i, f };
+		}
+
+		return b3CreateHull( points, n, 24 );
+	}
+
+	// Flat quad strip at y = 0 covering [z0, z1]. Interior vertices are shared, so a multi-quad
+	// strip has real internal edges for the mesh contact filter to work with.
+	b3MeshData* CreateStripMesh( float z0, float z1, int quadCount )
+	{
+		std::vector<b3Vec3> vertices;
+		std::vector<int32_t> indices;
+
+		float dz = ( z1 - z0 ) / (float)quadCount;
+		for ( int i = 0; i <= quadCount; ++i )
+		{
+			float z = z0 + (float)i * dz;
+			vertices.push_back( { -m_tileHalfWidth, 0.0f, z } );
+			vertices.push_back( { m_tileHalfWidth, 0.0f, z } );
+		}
+
+		for ( int i = 0; i < quadCount; ++i )
+		{
+			int p00 = 2 * i + 0;
+			int p10 = 2 * i + 1;
+			int p01 = 2 * i + 2;
+			int p11 = 2 * i + 3;
+
+			indices.push_back( p00 );
+			indices.push_back( p01 );
+			indices.push_back( p11 );
+
+			indices.push_back( p00 );
+			indices.push_back( p11 );
+			indices.push_back( p10 );
+		}
+
+		b3MeshDef meshDef = {};
+		meshDef.vertices = vertices.data();
+		meshDef.vertexCount = (int)vertices.size();
+		meshDef.indices = indices.data();
+		meshDef.triangleCount = (int)( indices.size() / 3 );
+		meshDef.identifyEdges = true;
+
+		return b3CreateMesh( &meshDef, nullptr, 0 );
+	}
+
+	void Clear()
+	{
+		for ( int i = 0; i < m_bodyCount; ++i )
+		{
+			b3DestroyBody( m_bodyIds[i] );
+		}
+		m_bodyCount = 0;
+
+		// Meshes are not cloned by b3CreateMeshShape, so they outlive their shapes by exactly
+		// this much: the bodies above are already gone.
+		for ( int i = 0; i < m_meshCount; ++i )
+		{
+			b3DestroyMesh( m_meshes[i] );
+		}
+		m_meshCount = 0;
+
+		if ( m_chamferHull != nullptr )
+		{
+			b3DestroyHull( m_chamferHull );
+			m_chamferHull = nullptr;
+		}
+	}
+
+	b3BodyId CreateTileBody( b3Pos position )
+	{
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_staticBody;
+		bodyDef.position = position;
+		b3BodyId bodyId = b3CreateBody( m_worldId, &bodyDef );
+		m_bodyIds[m_bodyCount++] = bodyId;
+		return bodyId;
+	}
+
+	void Build()
+	{
+		Clear();
+
+		b3ShapeDef beltDef = b3DefaultShapeDef();
+		beltDef.baseMaterial.friction = 0.4f;
+		beltDef.baseMaterial.tangentVelocity = { 0.0f, 0.0f, m_beltSpeed };
+
+		float halfRun = 0.5f * (float)m_tileCount * m_tileLength;
+
+		switch ( m_beltType )
+		{
+			case e_separateHulls:
+				for ( int i = 0; i < m_tileCount; ++i )
+				{
+					b3BodyId tileId = CreateTileBody( { 0.0f, -m_tileHalfDepth, ( (float)i + 0.5f ) * m_tileLength } );
+					b3BoxHull tile = b3MakeBoxHull( m_tileHalfWidth, m_tileHalfDepth, 0.5f * m_tileLength );
+					b3CreateHullShape( tileId, &beltDef, &tile.base );
+				}
+				break;
+
+			case e_mergedHull:
+			{
+				b3BodyId beltId = CreateTileBody( { 0.0f, -m_tileHalfDepth, halfRun } );
+				b3BoxHull belt = b3MakeBoxHull( m_tileHalfWidth, m_tileHalfDepth, halfRun );
+				b3CreateHullShape( beltId, &beltDef, &belt.base );
+			}
+			break;
+
+			case e_separateMeshes:
+				for ( int i = 0; i < m_tileCount; ++i )
+				{
+					b3BodyId tileId = CreateTileBody( { 0.0f, 0.0f, 0.0f } );
+					m_meshes[m_meshCount] = CreateStripMesh( (float)i * m_tileLength, (float)( i + 1 ) * m_tileLength, 1 );
+					b3CreateMeshShape( tileId, &beltDef, m_meshes[m_meshCount], b3Vec3_one );
+					m_meshCount += 1;
+				}
+				break;
+
+			case e_mergedMesh:
+			{
+				b3BodyId beltId = CreateTileBody( { 0.0f, 0.0f, 0.0f } );
+				m_meshes[m_meshCount] = CreateStripMesh( 0.0f, (float)m_tileCount * m_tileLength, m_tileCount );
+				b3CreateMeshShape( beltId, &beltDef, m_meshes[m_meshCount], b3Vec3_one );
+				m_meshCount += 1;
+			}
+			break;
+
+			case e_mixed:
+				// Straight belts (box colliders, so hulls) feeding a corner piece (a non-convex
+				// mesh collider, so a mesh shape) and out the other side.
+				for ( int i = 0; i < m_tileCount; ++i )
+				{
+					bool isCorner = ( i == 4 || i == 5 );
+					if ( isCorner )
+					{
+						b3BodyId tileId = CreateTileBody( { 0.0f, 0.0f, 0.0f } );
+						m_meshes[m_meshCount] = CreateStripMesh( (float)i * m_tileLength, (float)( i + 1 ) * m_tileLength, 1 );
+						b3CreateMeshShape( tileId, &beltDef, m_meshes[m_meshCount], b3Vec3_one );
+						m_meshCount += 1;
+					}
+					else
+					{
+						b3BodyId tileId = CreateTileBody( { 0.0f, -m_tileHalfDepth, ( (float)i + 0.5f ) * m_tileLength } );
+						b3BoxHull tile = b3MakeBoxHull( m_tileHalfWidth, m_tileHalfDepth, 0.5f * m_tileLength );
+						b3CreateHullShape( tileId, &beltDef, &tile.base );
+					}
+				}
+				break;
+		}
+
+		// Item
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = { 0.0f, m_itemHalfHeight, m_startZ };
+		bodyDef.rotation = b3MakeQuatFromAxisAngle( b3Vec3_axisY, m_itemYaw * B3_PI / 180.0f );
+		bodyDef.enableSleep = false;
+		bodyDef.name = "item";
+		m_itemId = b3CreateBody( m_worldId, &bodyDef );
+		m_bodyIds[m_bodyCount++] = m_itemId;
+
+		b3ShapeDef shapeDef = b3DefaultShapeDef();
+		shapeDef.baseMaterial.friction = 0.4f;
+
+		switch ( m_itemType )
+		{
+			case e_boxItem:
+			{
+				b3BoxHull box = b3MakeBoxHull( m_itemHalfHeight, m_itemHalfHeight, m_itemHalfHeight );
+				b3CreateHullShape( m_itemId, &shapeDef, &box.base );
+			}
+			break;
+
+			case e_chamferItem:
+				m_chamferHull = CreateChamferBoxHull( m_itemHalfHeight, m_chamfer );
+				b3CreateHullShape( m_itemId, &shapeDef, m_chamferHull );
+				break;
+
+			case e_sphereItem:
+			{
+				b3Sphere sphere;
+				sphere.center = { 0.0f, 0.0f, 0.0f };
+				sphere.radius = m_itemHalfHeight;
+				b3CreateSphereShape( m_itemId, &shapeDef, &sphere );
+			}
+			break;
+		}
+
+		m_wasLaunched = false;
+	}
+
+	void ResetCounters()
+	{
+		m_launchCount = 0;
+		m_maxLaunchSpeed = 0.0f;
+		m_markerCount = 0;
+	}
+
+	void Recycle()
+	{
+		b3Quat rotation = b3MakeQuatFromAxisAngle( b3Vec3_axisY, m_itemYaw * B3_PI / 180.0f );
+		b3Body_SetTransform( m_itemId, { 0.0f, m_itemHalfHeight, m_startZ }, rotation );
+		b3Body_SetLinearVelocity( m_itemId, b3Vec3_zero );
+		b3Body_SetAngularVelocity( m_itemId, b3Vec3_zero );
+		m_wasLaunched = false;
+		m_lapCount += 1;
+	}
+
+	void Step() override
+	{
+		Sample::Step();
+
+		if ( m_didStep )
+		{
+			b3Pos position = b3Body_GetPosition( m_itemId );
+			b3Vec3 velocity = b3Body_GetLinearVelocity( m_itemId );
+
+			// The belt surface is exactly y = 0, so a grounded item never rises above rest
+			// height on its own. Any upward velocity while grounded is a ghost collision.
+			bool grounded = position.y < m_itemHalfHeight + 0.05f;
+			bool launched = velocity.y > m_launchThreshold;
+
+			if ( grounded && launched && m_wasLaunched == false )
+			{
+				m_launchCount += 1;
+				m_maxLaunchSpeed = b3MaxFloat( m_maxLaunchSpeed, velocity.y );
+
+				if ( m_markerCount < m_markerCapacity )
+				{
+					m_markers[m_markerCount] = position;
+					m_markerCount += 1;
+				}
+			}
+
+			m_wasLaunched = launched;
+			m_currentSpeed = velocity.z;
+
+			if ( (float)position.z > (float)m_tileCount * m_tileLength - 0.3f || (float)position.y < -2.0f )
+			{
+				Recycle();
+			}
+		}
+
+		for ( int i = 0; i < m_markerCount; ++i )
+		{
+			DrawPoint( m_markers[i], 8.0f, MakeColor( b3_colorRed ) );
+		}
+
+		// Mark the seams so it is obvious the launches line up with them.
+		if ( m_beltType == e_separateHulls || m_beltType == e_separateMeshes || m_beltType == e_mixed )
+		{
+			for ( int i = 1; i < m_tileCount; ++i )
+			{
+				b3Pos seam = { 0.0f, 0.0f, (float)i * m_tileLength };
+				DrawPoint( seam, 4.0f, MakeColor( b3_colorGray ) );
+			}
+		}
+
+		DrawTextLine( "launches: %d over %d passes, worst %.2f m/s", m_launchCount, m_lapCount, m_maxLaunchSpeed );
+		DrawTextLine( "item speed %.2f m/s, belt speed %.2f m/s", m_currentSpeed, m_beltSpeed );
+	}
+
+	bool DrawControls() override
+	{
+		const char* beltNames[] = {
+			"separate hulls", "one merged hull", "separate meshes", "one merged mesh", "hulls + mesh corner",
+		};
+		const char* itemNames[] = { "box", "chamfered box", "sphere" };
+
+		bool rebuild = false;
+		rebuild |= ImGui::Combo( "Belt", &m_beltType, beltNames, IM_ARRAYSIZE( beltNames ) );
+		rebuild |= ImGui::Combo( "Item", &m_itemType, itemNames, IM_ARRAYSIZE( itemNames ) );
+		rebuild |= ImGui::SliderFloat( "Belt Speed", &m_beltSpeed, 0.25f, 4.0f, "%.2f m/s" );
+		rebuild |= ImGui::SliderFloat( "Item Yaw", &m_itemYaw, 0.0f, 90.0f, "%.0f deg" );
+
+		if ( rebuild )
+		{
+			Build();
+			ResetCounters();
+			m_lapCount = 0;
+		}
+
+		if ( ImGui::Button( "Reset Counters" ) )
+		{
+			ResetCounters();
+			m_lapCount = 0;
+		}
+
+		ImGui::Text( "Launches: %d", m_launchCount );
+		return true;
+	}
+
+	static Sample* Create( SampleContext* context )
+	{
+		return new ConveyorSeamGhost( context );
+	}
+
+	static constexpr float m_startZ = 0.5f;
+
+	b3BodyId m_bodyIds[m_tileCount + 1] = {};
+	int m_bodyCount = 0;
+	b3MeshData* m_meshes[m_tileCount] = {};
+	int m_meshCount = 0;
+	b3HullData* m_chamferHull = nullptr;
+	b3BodyId m_itemId = {};
+
+	int m_beltType = e_separateHulls;
+	int m_itemType = e_chamferItem;
+	float m_beltSpeed = 2.0f;
+	float m_itemYaw = 0.0f;
+
+	int m_launchCount = 0;
+	int m_lapCount = 0;
+	float m_maxLaunchSpeed = 0.0f;
+	float m_currentSpeed = 0.0f;
+	bool m_wasLaunched = false;
+	b3Pos m_markers[m_markerCapacity] = {};
+	int m_markerCount = 0;
+};
+
+static int sampleConveyorSeamGhost = RegisterSample( "Issues", "Conveyor Seam Ghost", ConveyorSeamGhost::Create );
