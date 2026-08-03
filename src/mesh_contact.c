@@ -520,6 +520,7 @@ typedef struct b3Cluster
 	b3LocalManifoldPoint* points;
 	int pointCapacity;
 	int pointCount;
+	bool grazing;
 } b3Cluster;
 
 bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact, const b3Shape* shapeA, const int* materialMap,
@@ -641,10 +642,37 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 		{
 			B3_ASSERT( manifold->feature != b3_featureNone );
 
+			b3Vec3 triangleNormal = b3MakeNormalFromPoints( vertices[0], vertices[1], vertices[2] );
+
+			// Grazing contact, the same case b3ClassifyGrazingContact handles for hull versus
+			// hull. The normal is far off the triangle's own face, so it is a corner or edge
+			// direction that rotates away as the body keeps moving, not a surface the body can
+			// rest on. Enforcing it speculatively converts sliding velocity into an upward
+			// launch, which is what makes an item jump where two flush colliders meet. While
+			// nothing is touching, drop the triangle. Once the shapes really overlap keep it,
+			// because the overlap has to be resolved, but skip the rest offset so the shapes are
+			// not also pushed apart along that corner direction.
+			bool grazing = b3Dot( manifold->normal, triangleNormal ) < B3_GRAZING_FACE_ALIGNMENT;
+			if ( grazing )
+			{
+				float minSeparation = manifold->points[0].separation;
+				for ( int i = 1; i < manifoldPointCount; ++i )
+				{
+					minSeparation = b3MinFloat( minSeparation, manifold->points[i].separation );
+				}
+
+				if ( minSeparation > 0.0f )
+				{
+					manifold->pointCount = 0;
+					continue;
+				}
+			}
+
+			manifold->grazing = grazing;
 			manifoldCount += 1;
 			totalPointCount += manifoldPointCount;
 			manifold->triangleIndex = triangleIndex;
-			manifold->triangleNormal = b3MakeNormalFromPoints( vertices[0], vertices[1], vertices[2] );
+			manifold->triangleNormal = triangleNormal;
 			manifold->i1 = triangle.i1;
 			manifold->i2 = triangle.i2;
 			manifold->i3 = triangle.i3;
@@ -916,12 +944,17 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 		{
 			clusterMemberships[i] = clusterIndex;
 			clusters[clusterIndex].pointCapacity += manifold->pointCount;
+
+			// A cluster only gathers near-identical normals, so its members agree. Take grazing
+			// if any member has it, so the rest offset is never applied along a corner.
+			clusters[clusterIndex].grazing = clusters[clusterIndex].grazing || manifold->grazing;
 		}
 		else
 		{
 			clusters[clusterCount].manifoldNormal = manifoldNormal;
 			clusters[clusterCount].triangleNormal = triangleNormal;
 			clusters[clusterCount].pointCapacity = manifold->pointCount;
+			clusters[clusterCount].grazing = manifold->grazing;
 			clusterMemberships[i] = clusterCount;
 			clusterCount += 1;
 		}
@@ -1052,6 +1085,11 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 			consumed[bestIndex] = true;
 		}
 
+		// The rest offset only makes sense for a contact resting on the triangle face. Applying
+		// it to a grazing contact would push the shapes apart along a corner direction, which
+		// pops a sliding body upward.
+		float clusterRestOffset = cm->grazing ? 0.0f : restOffset;
+
 		for ( int j = 0; j < pointCount; ++j )
 		{
 			const b3LocalManifoldPoint* source = cm->points + j;
@@ -1060,7 +1098,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 			// Contact points are computed in frame B
 			target->anchorB = b3MulMV( matrixB, source->point );
 			target->anchorA = b3Add( target->anchorB, offsetA );
-			target->separation = source->separation - restOffset;
+			target->separation = source->separation - clusterRestOffset;
 			target->featureId = b3MakeFeatureId( source->pair );
 			target->triangleIndex = source->triangleIndex;
 
