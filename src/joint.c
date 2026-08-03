@@ -155,6 +155,8 @@ typedef struct b3JointPair
 	b3JointSim* jointSim;
 } b3JointPair;
 
+static void b3DestroyContactsBetweenBodies( b3World* world, b3Body* bodyA, b3Body* bodyB );
+
 static b3JointPair b3CreateJoint( b3World* world, const b3JointDef* def, b3JointType type )
 {
 	B3_ASSERT( b3IsValidTransform( def->localFrameA ) );
@@ -326,6 +328,11 @@ static b3JointPair b3CreateJoint( b3World* world, const b3JointDef* def, b3Joint
 	{
 		// Add edge to island graph
 		b3LinkJoint( world, joint );
+	}
+
+	if ( def->collideConnected == false )
+	{
+		b3DestroyContactsBetweenBodies( world, b3Array_Get( world->bodies, bodyIdA ), b3Array_Get( world->bodies, bodyIdB ) );
 	}
 
 	b3ValidateSolverSets( world );
