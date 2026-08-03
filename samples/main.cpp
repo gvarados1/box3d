@@ -415,6 +415,7 @@ static void OnFrame( void )
 	// b3DebugDraw adapter and the sample's own Draw* calls.
 	SetTransparentDynamic( s_context.transparentDynamic );
 	SetTransparentKinematic( s_context.transparentKinematic );
+	SetTransparentSensors( s_context.transparentSensors );
 	s_context.sample->ResetText();
 
 	s_context.sample->Step();

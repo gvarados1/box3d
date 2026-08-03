@@ -36,6 +36,11 @@
 #define INFO_PANEL_WIDTH 20.0f
 
 // Load a file. You must free the character array.
+// Category mask for b3World_Draw. Category bits are the application's layer indices
+// (Unity layers for game recordings); the View > Draw Categories menu edits this.
+// Shared with the replay viewer's own draw call (extern in sample.h).
+uint64_t g_drawMaskBits = B3_DEFAULT_MASK_BITS;
+
 static char* ReadFile( int& size, const char* filename )
 {
 	FILE* file = fopen( filename, "rb" );
@@ -517,7 +522,7 @@ void Sample::Step()
 
 	ApplyGuiFlags( &debugDraw );
 
-	b3World_Draw( m_worldId, &debugDraw, B3_DEFAULT_MASK_BITS );
+	b3World_Draw( m_worldId, &debugDraw, g_drawMaskBits );
 }
 
 bool Sample::FocusBounds( b3AABB* )
@@ -1646,10 +1651,37 @@ static void DrawMenuBar( SampleContext* context )
 				cam.Frame( aabb, aspect, 0.75f );
 			}
 			ImGui::MenuItem( "Shapes", nullptr, &gd->drawShapes );
+			ImGui::MenuItem( "Sensors", nullptr, &gd->drawSensors );
+			if ( ImGui::BeginMenu( "Draw Categories" ) )
+			{
+				// Category bits are the application's layer indices (Unity layers for
+				// recordings from the game). Uncheck a bit to hide those shapes.
+				if ( ImGui::MenuItem( "All" ) )
+				{
+					g_drawMaskBits = B3_DEFAULT_MASK_BITS;
+				}
+				if ( ImGui::MenuItem( "None" ) )
+				{
+					g_drawMaskBits = 0;
+				}
+				ImGui::Separator();
+				for ( int bit = 0; bit < 32; ++bit )
+				{
+					char label[32];
+					snprintf( label, sizeof( label ), "Layer %d", bit );
+					bool on = ( g_drawMaskBits & ( 1ULL << bit ) ) != 0;
+					if ( ImGui::MenuItem( label, nullptr, on ) )
+					{
+						g_drawMaskBits ^= ( 1ULL << bit );
+					}
+				}
+				ImGui::EndMenu();
+			}
 			if ( ImGui::BeginMenu( "Transparency" ) )
 			{
 				ImGui::MenuItem( "Dynamic", nullptr, &context->transparentDynamic );
 				ImGui::MenuItem( "Kinematic", nullptr, &context->transparentKinematic );
+				ImGui::MenuItem( "Sensors", nullptr, &context->transparentSensors );
 				ImGui::EndMenu();
 			}
 			ImGui::MenuItem( "Joints", nullptr, &gd->drawJoints );

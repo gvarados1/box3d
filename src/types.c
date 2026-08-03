@@ -149,6 +149,7 @@ b3DebugDraw b3DefaultDebugDraw( void )
 
 	draw.jointScale = 1.0f;
 	draw.forceScale = 1.0f;
+	draw.drawSensors = true;
 
 	return draw;
 }

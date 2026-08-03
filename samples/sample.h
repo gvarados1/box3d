@@ -61,6 +61,7 @@ struct SampleContext
 	int workerCount = 1;
 	bool transparentDynamic = false;
 	bool transparentKinematic = false;
+	bool transparentSensors = false;
 	bool enableWarmStarting = true;
 	bool enableContinuous = true;
 	bool enableSleep = true;
@@ -246,6 +247,10 @@ struct SampleEntry
 
 extern SampleEntry g_sampleEntries[MAX_SAMPLES];
 extern int g_sampleCount;
+
+// Category mask applied to every b3World_Draw (live samples and the replay viewer).
+// Edited by the View > Draw Categories menu; bits are application layer indices.
+extern uint64_t g_drawMaskBits;
 
 // Index of the registered Replay viewer, or -1 if none. Gates the Replay menu.
 extern int g_replayIndex;

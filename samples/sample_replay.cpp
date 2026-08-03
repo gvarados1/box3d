@@ -637,7 +637,7 @@ public:
 			ClearSelection();
 		}
 
-		b3World_Draw( m_replayWorldId, &debugDraw, B3_DEFAULT_MASK_BITS );
+		b3World_Draw( m_replayWorldId, &debugDraw, g_drawMaskBits );
 
 		// Overlay query geometry and recorded hits on top of the world. The toggle draws every recorded
 		// query, otherwise just the selected one. Re-resolve the pinned query to this frame so a repeated

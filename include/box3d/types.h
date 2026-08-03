@@ -3013,6 +3013,11 @@ typedef struct b3DebugDraw
 	/// Option to draw shapes
 	bool drawShapes;
 
+	/// Option to draw sensors. When false a sensor shape is skipped entirely, so its bounds
+	/// are not drawn either, and a body carrying only sensor shapes gets no name, mass or
+	/// sleep overlay.
+	bool drawSensors;
+
 	/// Option to draw joints
 	bool drawJoints;
 

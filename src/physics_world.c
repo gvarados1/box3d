@@ -1221,6 +1221,11 @@ static bool DrawQueryCallback( int proxyId, uint64_t userData, void* context )
 	b3Shape* shape = b3Array_Get( world->shapes, shapeId );
 	B3_ASSERT( shape->id == shapeId );
 
+	if ( draw->drawSensors == false && shape->sensorIndex != B3_NULL_INDEX )
+	{
+		return true;
+	}
+
 	b3SetBit( &world->debugBodySet, shape->bodyId );
 
 	if ( draw->drawShapes )

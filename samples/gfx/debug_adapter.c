@@ -63,6 +63,7 @@ typedef struct
 	// valid only when kind == Box3DUS_Free
 	int nextFree;
 	b3BodyType bodyType;
+	bool isSensor;
 	bool isGround;
 	b3ShapeId shapeId;
 	b3BodyId bodyId;
@@ -121,6 +122,7 @@ typedef struct
 
 	bool transparentDynamic;
 	bool transparentKinematic;
+	bool transparentSensors;
 
 	// View box for compound child culling, world space, refreshed once per frame.
 	b3AABB viewBounds;
@@ -158,6 +160,7 @@ void InitAdapter( void )
 	s_adapter.selectedShapeId = b3_nullShapeId;
 	s_adapter.transparentDynamic = false;
 	s_adapter.transparentKinematic = false;
+	s_adapter.transparentSensors = false;
 
 	s_adapter.hasViewBounds = false;
 	s_adapter.lastCompoundAppended = 0;
@@ -197,6 +200,7 @@ void ResetAdapterPool( void )
 	s_adapter.selectedShapeId = b3_nullShapeId;
 	s_adapter.transparentDynamic = false;
 	s_adapter.transparentKinematic = false;
+	s_adapter.transparentSensors = false;
 
 	s_adapter.hasViewBounds = false;
 	s_adapter.lastCompoundAppended = 0;
@@ -214,6 +218,7 @@ void ApplyGuiFlags( b3DebugDraw* out )
 	out->forceScale = s_adapter.guiDraw.forceScale;
 	out->jointScale = s_adapter.guiDraw.jointScale;
 	out->drawShapes = s_adapter.guiDraw.drawShapes;
+	out->drawSensors = s_adapter.guiDraw.drawSensors;
 	out->drawJoints = s_adapter.guiDraw.drawJoints;
 	out->drawJointExtras = s_adapter.guiDraw.drawJointExtras;
 	out->drawBounds = s_adapter.guiDraw.drawBounds;
@@ -237,6 +242,11 @@ void SetTransparentDynamic( bool enabled )
 void SetTransparentKinematic( bool enabled )
 {
 	s_adapter.transparentKinematic = enabled;
+}
+
+void SetTransparentSensors( bool enabled )
+{
+	s_adapter.transparentSensors = enabled;
 }
 
 void SetViewBounds( b3AABB bounds )
@@ -455,6 +465,7 @@ static void PopulateCommonFields( DebugShape* us, const b3DebugShape* debugShape
 {
 	const b3BodyId bodyId = b3Shape_GetBody( debugShape->shapeId );
 	us->bodyType = b3Body_GetType( bodyId );
+	us->isSensor = b3Shape_IsSensor( debugShape->shapeId );
 	us->isGround = strcmp( b3Shape_GetName( debugShape->shapeId ), BOX3D_GROUND_SHAPE_NAME ) == 0;
 	us->shapeId = debugShape->shapeId;
 	us->bodyId = bodyId;
@@ -495,6 +506,7 @@ static int CreateCompoundChild( const b3ChildShape* child, const DebugShape* par
 
 	DebugShape* us = &s_adapter.pool[index];
 	us->bodyType = parent->bodyType;
+	us->isSensor = parent->isSensor;
 	us->isGround = parent->isGround;
 	us->shapeId = parent->shapeId;
 	us->bodyId = parent->bodyId;
@@ -864,6 +876,11 @@ static void DrawShape( void* userShape, b3WorldTransform shapeTransform, b3HexCo
 	}
 
 	if ( s_adapter.transparentKinematic && us->bodyType == b3_kinematicBody )
+	{
+		c.w = BOX3D_TRANSPARENT_ALPHA;
+	}
+
+	if ( s_adapter.transparentSensors && us->isSensor )
 	{
 		c.w = BOX3D_TRANSPARENT_ALPHA;
 	}
