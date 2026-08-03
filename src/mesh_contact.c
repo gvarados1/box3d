@@ -1088,6 +1088,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 	const b3SurfaceMaterial* materialsA = b3GetShapeMaterials( shapeA );
 	const b3SurfaceMaterial* materialB = b3GetShapeMaterials( shapeB );
 	b3Vec3 tangentVelocityA = b3Vec3_zero;
+	float rollingResistanceA = 0.0f;
 
 	// Update friction and restitution if the mesh has per triangle material
 	if ( shapeA->materialCount > 0 )
@@ -1134,6 +1135,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 													 materialB->userMaterialId );
 				restitution += world->restitutionCallback( material.restitution, material.userMaterialId, materialB->restitution,
 														   materialB->userMaterialId );
+				rollingResistanceA += material.rollingResistance;
 
 				tangentVelocityA = b3Add( tangentVelocityA, material.tangentVelocity );
 
@@ -1146,6 +1148,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 			float invCount = 1.0f / sampleCount;
 			contact->friction = invCount * friction;
 			contact->restitution = invCount * restitution;
+			rollingResistanceA *= invCount;
 			tangentVelocityA = b3MulSV( invCount, tangentVelocityA );
 		}
 
@@ -1159,6 +1162,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 													 materialB->userMaterialId );
 		contact->restitution = world->restitutionCallback( materialsA[0].restitution, materialsA[0].userMaterialId,
 														   materialB->restitution, materialB->userMaterialId );
+		rollingResistanceA = materialsA[0].rollingResistance;
 		tangentVelocityA = materialsA[0].tangentVelocity;
 	}
 
@@ -1178,7 +1182,11 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 		radiusB = shapeB->hull->innerRadius;
 	}
 
-	contact->rollingResistance = materialB->rollingResistance * radiusB;
+	// Match the convex-convex rule in contact.c: the HIGHER of the two materials'
+	// rolling resistance wins. The mesh side samples its (per-triangle) materials just
+	// like friction above; previously the mesh material's rolling resistance was
+	// ignored entirely, so belts authored as mesh surfaces could not slow rollers.
+	contact->rollingResistance = b3MaxFloat( rollingResistanceA, materialB->rollingResistance ) * radiusB;
 
 	b3Vec3 tangentVelocityB = b3RotateVector( xfB.q, materialB->tangentVelocity );
 	contact->tangentVelocity = b3Sub( tangentVelocityA, tangentVelocityB );
