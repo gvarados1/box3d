@@ -604,6 +604,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 		manifold->pointCount = 0;
 		manifold->triangleFlags = triangle.flags;
 		manifold->feature = b3_featureNone;
+		manifold->grazing = false;
 
 		switch ( shapeB->type )
 		{

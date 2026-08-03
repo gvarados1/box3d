@@ -2691,6 +2691,9 @@ typedef struct
 
 	/// Was the cache re-used?
 	uint8_t hit;
+
+	/// Was the cached manifold classified as grazing? See B3_GRAZING_FACE_ALIGNMENT.
+	uint8_t grazing;
 } b3SATCache;
 
 /// Contact points are always the result of two edges intersecting.
@@ -2751,6 +2754,11 @@ typedef struct b3LocalManifold
 
 	/// The squared distance of a sphere from a triangle. For ghost collision reduction.
 	float squaredDistance;
+
+	/// True when the contacting features are a steeply angled face pair rather than a matched
+	/// face pair, so the contact is riding over a corner or edge. Set by hull versus hull
+	/// collision, left false by everything else. See B3_GRAZING_FACE_ALIGNMENT.
+	bool grazing;
 
 	/// The triangle feature involved.
 	b3TriangleFeature feature;

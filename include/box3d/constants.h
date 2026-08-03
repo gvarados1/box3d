@@ -84,6 +84,24 @@ B3_API float b3GetStallThreshold( void );
 /// Must be at least B3_LINEAR_SLOP and less than B3_SPECULATIVE_DISTANCE.
 #define B3_MESH_REST_OFFSET ( 1.0f * B3_LINEAR_SLOP )
 
+/// The rest offset for convex (non-mesh) contact, same idea as B3_MESH_REST_OFFSET. Without it a
+/// shape resting on one hull sinks by the solver's residual penetration and then catches on the
+/// leading face of the next hull, so butted-together colliders (conveyor tiles, floor tiles)
+/// behave like a curb. Set to zero to restore contact with no gap.
+#ifndef B3_CONVEX_REST_OFFSET
+#define B3_CONVEX_REST_OFFSET ( 1.0f * B3_LINEAR_SLOP )
+#endif
+
+/// Minimum cosine between the contact normal and the best supporting face of each hull for the
+/// contact to count as a matched face pair. Below this the contact is riding a corner or edge,
+/// so the normal is a transient direction that rotates away as the body keeps moving. Enforcing
+/// such a normal speculatively turns sliding velocity into a launch, which is what makes a body
+/// jump when it crosses the seam between two flush colliders. The default is about 25 degrees.
+/// Set to -1 to disable grazing contact handling.
+#ifndef B3_GRAZING_FACE_ALIGNMENT
+#define B3_GRAZING_FACE_ALIGNMENT 0.9f
+#endif
+
 /// The default contact recycling distance.
 #define B3_CONTACT_RECYCLE_DISTANCE ( 10.0f * B3_LINEAR_SLOP )
 

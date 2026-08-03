@@ -1768,6 +1768,39 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 #undef NF
 #undef NV
 
+// Flag a hull versus hull manifold that is riding over a corner instead of resolving a matched
+// face pair. This only labels the manifold. What to do about it is a simulation decision and is
+// made in the contact update, so the collision query itself stays a pure geometric report.
+//
+// The manifold normal and both query normals point from A to B, so a matched face pair (a box
+// resting flat on a slab) agrees with the supporting face of both hulls and scores near one. A
+// low score means the contact normal is a corner or edge direction that belongs to neither
+// supporting face. That happens when a shape slides over the exposed corner of a neighbouring
+// shape: butted-together conveyor tiles or floor tiles, where the leading top edge of the next
+// tile pokes into the sliding shape's bottom chamfer. Such a normal is transient - it rotates
+// away as the body keeps moving - so enforcing it speculatively converts sliding velocity into
+// an upward launch, and the body appears to jump at the seam.
+static void b3ClassifyGrazingContact( b3LocalManifold* manifold, b3SATCache* cache, const b3AxisQuery* axisQuery )
+{
+	if ( manifold->pointCount == 0 || B3_GRAZING_FACE_ALIGNMENT < 0.0f )
+	{
+		return;
+	}
+
+	float alignment = b3MinFloat( b3Dot( manifold->normal, axisQuery->faceA.normal ),
+								  b3Dot( manifold->normal, axisQuery->faceB.normal ) );
+	if ( alignment >= B3_GRAZING_FACE_ALIGNMENT )
+	{
+		return;
+	}
+
+	manifold->grazing = true;
+
+	// The cached path rebuilds the manifold from the stored feature without redoing the axis
+	// query, so remember the classification for it to restore.
+	cache->grazing = 1;
+}
+
 #define B3_SIMD_COLLIDE_HULLS 1
 
 #if B3_SIMD_COLLIDE_HULLS == 1
@@ -1776,6 +1809,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 					 b3Transform transformBtoA, b3SATCache* cache )
 {
 	manifold->pointCount = 0;
+	manifold->grazing = false;
 
 	if ( capacity < 4 )
 	{
@@ -1835,6 +1869,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
 			{
 				// Cache hit, contact points generated
+				manifold->grazing = cache->grazing != 0;
 				cache->hit = 1;
 				return;
 			}
@@ -1874,6 +1909,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
 			{
 				// Cache hit, contact points generated
+				manifold->grazing = cache->grazing != 0;
 				cache->hit = 1;
 				return;
 			}
@@ -1950,6 +1986,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 					if ( touching && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
 					{
 						// Cache hit, contact point generated
+						manifold->grazing = cache->grazing != 0;
 						cache->hit = 1;
 						return;
 					}
@@ -2061,6 +2098,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 	if ( edgeQuery.indexA == B3_NULL_INDEX )
 	{
 		// There are no valid edge pairs (all edges parallel)
+		b3ClassifyGrazingContact( manifold, cache, &axisQuery );
 		return;
 	}
 
@@ -2094,6 +2132,8 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			*cache = edgeCache;
 		}
 	}
+
+	b3ClassifyGrazingContact( manifold, cache, &axisQuery );
 }
 
 #else
@@ -2283,6 +2323,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 					 b3Transform transformBtoA, b3SATCache* cache )
 {
 	manifold->pointCount = 0;
+	manifold->grazing = false;
 
 	if ( capacity < 4 )
 	{

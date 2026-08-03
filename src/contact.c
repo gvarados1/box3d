@@ -533,6 +533,25 @@ static bool b3ComputeConvexManifold( b3World* world, int workerIndex, b3Contact*
 		}
 	}
 
+	// A grazing manifold rides over a corner rather than resolving a matched face pair, so its
+	// normal is a transient direction that rotates away as the bodies keep moving. While nothing
+	// is touching, enforcing it speculatively would convert sliding velocity into a launch, which
+	// is what makes a body jump when it crosses the seam between two flush colliders. Drop it and
+	// let the contact form for real once the shapes actually overlap.
+	if ( geomManifold.grazing && geomManifold.pointCount > 0 )
+	{
+		float minSeparation = geomManifold.points[0].separation;
+		for ( int i = 1; i < geomManifold.pointCount; ++i )
+		{
+			minSeparation = b3MinFloat( minSeparation, geomManifold.points[i].separation );
+		}
+
+		if ( minSeparation > 0.0f )
+		{
+			geomManifold.pointCount = 0;
+		}
+	}
+
 	if ( geomManifold.pointCount == 0 )
 	{
 		if ( contact->manifoldCount > 0 )
@@ -565,6 +584,10 @@ static bool b3ComputeConvexManifold( b3World* world, int workerIndex, b3Contact*
 	b3Matrix3 matrixA = b3MakeMatrixFromQuat( xfA.q );
 	manifold->normal = b3MulMV( matrixA, geomManifold.normal );
 
+	// The rest offset only makes sense for a matched face pair. Applying it to a grazing contact
+	// would push the shapes apart along a corner direction, which pops a sliding body upward.
+	float restOffset = geomManifold.grazing ? 0.0f : B3_CONVEX_REST_OFFSET;
+
 	// Store point data in contact
 	for ( int i = 0; i < geomManifold.pointCount; ++i )
 	{
@@ -574,7 +597,7 @@ static bool b3ComputeConvexManifold( b3World* world, int workerIndex, b3Contact*
 		// Contact points are computed in frame A
 		target->anchorA = b3MulMV( matrixA, source->point );
 		target->anchorB = b3Add( target->anchorA, b3SubPos( xfA.p, xfB.p ) );
-		target->separation = source->separation;
+		target->separation = source->separation - restOffset;
 		target->featureId = b3MakeFeatureId( source->pair );
 		target->triangleIndex = B3_NULL_INDEX;
 		target->normalVelocity = 0.0f;
