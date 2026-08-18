@@ -278,7 +278,6 @@ typedef struct b3World
 	uint16_t worldId;
 
 	bool enableSleep;
-	bool enableSensorUpdates;
 
 	// This indicates there is a world write operation in progress. This is for debugging and
 	// not a real mutex. This should have minimal performance impact.
