@@ -2692,9 +2692,6 @@ typedef struct
 
 	/// Was the cache re-used?
 	uint8_t hit;
-
-	/// Was the cached manifold classified as grazing? See B3_GRAZING_FACE_ALIGNMENT.
-	uint8_t grazing;
 } b3SATCache;
 
 /// Contact points are always the result of two edges intersecting.

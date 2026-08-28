@@ -1003,6 +1003,18 @@ static bool b3BuildFaceAContact( b3LocalManifold* manifold, int capacity, const 
 	b3Vec3 refNormalInB = b3InvRotateVector( transformBtoA.q, refPlane.normal );
 	int incFace = b3FindIncidentFace( hullB, refNormalInB, query.indexB );
 
+	// Classify this face pair as matched or grazing here rather than from the axis query, so the
+	// answer is recomputed on every call. The cached path re-enters this builder without redoing
+	// the axis query, so a classification carried in the SAT cache would freeze at whatever the
+	// geometry looked like when the contact was born - and for a body crossing a seam that is the
+	// one moment it is grazing. The contact would then keep its rest offset suppressed for the
+	// whole traverse, leaving the body riding below the surface, which turns every later seam
+	// into a step up. The incident face is the face actually being clipped against the reference
+	// face, so it is the right thing to measure the pair against.
+	const b3Plane* incPlanes = b3GetHullPlanes( hullB );
+	b3Vec3 incNormalInA = b3RotateVector( transformBtoA.q, incPlanes[incFace].normal );
+	manifold->grazing = b3Dot( refPlane.normal, b3Neg( incNormalInA ) ) < B3_GRAZING_FACE_ALIGNMENT;
+
 	// Build clip polygon from incident face in frame A
 	b3ClipVertex buffer1[B3_MAX_CLIP_POINTS], buffer2[B3_MAX_CLIP_POINTS];
 	int pointCount = b3BuildPolygon( buffer1, transformBtoA, hullB, incFace, refPlane );
@@ -1162,6 +1174,23 @@ static bool b3BuildEdgeContact( b3LocalManifold* manifold, const b3HullData* hul
 	{
 		*cache = (b3SATCache){ 0 };
 		return false;
+	}
+
+	// Classify against the faces adjacent to each edge, for the same reason the face builder does
+	// it inline: the cached path re-enters here without redoing the axis query, so the answer has
+	// to come from the features actually forming the contact rather than be carried forward from
+	// whatever the geometry looked like when the contact was born.
+	{
+		const b3Plane* planesA = b3GetHullPlanes( hullA );
+		const b3Plane* planesB = b3GetHullPlanes( hullB );
+		b3Vec3 uA = planesA[edgeA->face].normal;
+		b3Vec3 vA = planesA[twinA->face].normal;
+		b3Vec3 uB = b3RotateVector( transformBtoA.q, planesB[edgeB->face].normal );
+		b3Vec3 vB = b3RotateVector( transformBtoA.q, planesB[twinB->face].normal );
+
+		float alignA = b3MaxFloat( b3Dot( normal, uA ), b3Dot( normal, vA ) );
+		float alignB = b3MaxFloat( b3Dot( normal, b3Neg( uB ) ), b3Dot( normal, b3Neg( vB ) ) );
+		manifold->grazing = b3MinFloat( alignA, alignB ) < B3_GRAZING_FACE_ALIGNMENT;
 	}
 
 	// This can slide off the end from caching
@@ -1768,38 +1797,24 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 #undef NF
 #undef NV
 
-// Flag a hull versus hull manifold that is riding over a corner instead of resolving a matched
-// face pair. This only labels the manifold. What to do about it is a simulation decision and is
-// made in the contact update, so the collision query itself stays a pure geometric report.
+// A hull versus hull manifold is flagged grazing when it is riding over a corner instead of
+// resolving a matched face pair. The flag only labels the manifold; what to do about it is a
+// simulation decision made in the contact update, so the collision query stays a pure geometric
+// report.
 //
-// The manifold normal and both query normals point from A to B, so a matched face pair (a box
-// resting flat on a slab) agrees with the supporting face of both hulls and scores near one. A
-// low score means the contact normal is a corner or edge direction that belongs to neither
-// supporting face. That happens when a shape slides over the exposed corner of a neighbouring
-// shape: butted-together conveyor tiles or floor tiles, where the leading top edge of the next
-// tile pokes into the sliding shape's bottom chamfer. Such a normal is transient - it rotates
-// away as the body keeps moving - so enforcing it speculatively converts sliding velocity into
-// an upward launch, and the body appears to jump at the seam.
-static void b3ClassifyGrazingContact( b3LocalManifold* manifold, b3SATCache* cache, const b3AxisQuery* axisQuery )
-{
-	if ( manifold->pointCount == 0 || B3_GRAZING_FACE_ALIGNMENT < 0.0f )
-	{
-		return;
-	}
-
-	float alignment = b3MinFloat( b3Dot( manifold->normal, axisQuery->faceA.normal ),
-								  b3Dot( manifold->normal, axisQuery->faceB.normal ) );
-	if ( alignment >= B3_GRAZING_FACE_ALIGNMENT )
-	{
-		return;
-	}
-
-	manifold->grazing = true;
-
-	// The cached path rebuilds the manifold from the stored feature without redoing the axis
-	// query, so remember the classification for it to restore.
-	cache->grazing = 1;
-}
+// A matched face pair (a box resting flat on a slab) has a reference face and an incident face
+// that are near anti-parallel, and scores near one. A low score means the contact normal is a
+// corner or edge direction belonging to neither shape's contacting face. That happens when a
+// shape slides over the exposed corner of a neighbouring shape: butted-together conveyor tiles
+// or floor tiles, where the leading top edge of the next tile pokes into the sliding shape's
+// bottom chamfer. Such a normal is transient - it rotates away as the body keeps moving - so
+// enforcing it speculatively converts sliding velocity into an upward launch, and the body
+// appears to jump at the seam.
+//
+// The classification is made by whichever builder produces the manifold, from the features that
+// build it, and is deliberately NOT carried in the SAT cache. The cached path re-enters those
+// builders without redoing the axis query, so a cached answer would freeze at whatever the
+// geometry looked like when the contact was born.
 
 #define B3_SIMD_COLLIDE_HULLS 1
 
@@ -1869,7 +1884,6 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
 			{
 				// Cache hit, contact points generated
-				manifold->grazing = cache->grazing != 0;
 				cache->hit = 1;
 				return;
 			}
@@ -1909,7 +1923,6 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
 			{
 				// Cache hit, contact points generated
-				manifold->grazing = cache->grazing != 0;
 				cache->hit = 1;
 				return;
 			}
@@ -1986,7 +1999,6 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 					if ( touching && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
 					{
 						// Cache hit, contact point generated
-						manifold->grazing = cache->grazing != 0;
 						cache->hit = 1;
 						return;
 					}
@@ -2098,7 +2110,6 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 	if ( edgeQuery.indexA == B3_NULL_INDEX )
 	{
 		// There are no valid edge pairs (all edges parallel)
-		b3ClassifyGrazingContact( manifold, cache, &axisQuery );
 		return;
 	}
 
@@ -2132,8 +2143,6 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			*cache = edgeCache;
 		}
 	}
-
-	b3ClassifyGrazingContact( manifold, cache, &axisQuery );
 }
 
 #else
