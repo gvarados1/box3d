@@ -111,6 +111,12 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
 
 add_library(box3d ${BOX3D_SOURCE_FILES} ${BOX3D_INCLUDE_FILES})
 
+# Windows DLL builds get a version resource (CompanyName/FileDescription/...) so the
+# binary isn't an anonymous DLL to antivirus heuristics and file explorers.
+if (WIN32 AND BUILD_SHARED_LIBS)
+	target_sources(box3d PRIVATE box3d.rc)
+endif()
+
 # target_link_libraries(box3d PRIVATE eastl)
 
 target_include_directories(box3d
