@@ -478,7 +478,8 @@ void b3DestroyContact( b3World* world, b3Contact* contact, bool wakeBodies )
 }
 
 static bool b3ComputeConvexManifold( b3World* world, int workerIndex, b3Contact* contact, const b3Shape* shapeA,
-									 b3WorldTransform xfA, const b3Shape* shapeB, b3WorldTransform xfB, b3Arena arena )
+									 b3WorldTransform xfA, const b3Shape* shapeB, b3WorldTransform xfB, bool isFast,
+									 b3Arena arena )
 {
 	b3ShapeType typeA = shapeA->type;
 	b3ShapeType typeB = shapeB->type;
@@ -538,7 +539,13 @@ static bool b3ComputeConvexManifold( b3World* world, int workerIndex, b3Contact*
 	// is touching, enforcing it speculatively would convert sliding velocity into a launch, which
 	// is what makes a body jump when it crosses the seam between two flush colliders. Drop it and
 	// let the contact form for real once the shapes actually overlap.
-	if ( geomManifold.grazing && geomManifold.pointCount > 0 )
+	//
+	// Never do this for a fast body. A fast body covers more than half its own inner radius in a
+	// step, so a speculative contact is the only thing keeping it out of the geometry - and the
+	// contact it needs is exactly a grazing one, because a body arriving corner first has no face
+	// pair to match yet. Dropping it there hands the body a free full-step advance through the
+	// floor. The seam launch this rule exists to prevent is a sliding artifact, not a fast one.
+	if ( geomManifold.grazing && isFast == false && geomManifold.pointCount > 0 )
 	{
 		float minSeparation = geomManifold.points[0].separation;
 		for ( int i = 1; i < geomManifold.pointCount; ++i )
@@ -636,10 +643,10 @@ static bool b3ComputeConvexManifold( b3World* world, int workerIndex, b3Contact*
 }
 
 static bool b3UpdateConvexContact( b3World* world, int workerIndex, b3Contact* contact, b3Shape* shapeA, b3WorldTransform xfA,
-								   b3Shape* shapeB, b3WorldTransform xfB, bool flip, b3Arena arena )
+								   b3Shape* shapeB, b3WorldTransform xfB, bool flip, bool isFast, b3Arena arena )
 {
 	// Compute new manifold
-	bool touching = b3ComputeConvexManifold( world, workerIndex, contact, shapeA, xfA, shapeB, xfB, arena );
+	bool touching = b3ComputeConvexManifold( world, workerIndex, contact, shapeA, xfA, shapeB, xfB, isFast, arena );
 
 	if ( touching == false )
 	{
@@ -785,12 +792,12 @@ bool b3UpdateContact( b3World* world, int workerIndex, b3Contact* contact, b3Sha
 			{
 				// Flip
 				bool flip = true;
-				touching = b3UpdateConvexContact( world, workerIndex, contact, shapeB, xfB, &childShapeA, xfA, flip, arena );
+				touching = b3UpdateConvexContact( world, workerIndex, contact, shapeB, xfB, &childShapeA, xfA, flip, isFast, arena );
 			}
 			else
 			{
 				bool flip = false;
-				touching = b3UpdateConvexContact( world, workerIndex, contact, &childShapeA, xfA, shapeB, xfB, flip, arena );
+				touching = b3UpdateConvexContact( world, workerIndex, contact, &childShapeA, xfA, shapeB, xfB, flip, isFast, arena );
 			}
 		}
 		else if ( child.type == b3_hullShape )
@@ -798,7 +805,7 @@ bool b3UpdateContact( b3World* world, int workerIndex, b3Contact* contact, b3Sha
 			childShapeA.hull = child.hull;
 			b3WorldTransform xfChild = b3MulWorldTransforms( xfA, child.transform );
 			bool flip = false;
-			touching = b3UpdateConvexContact( world, workerIndex, contact, &childShapeA, xfChild, shapeB, xfB, flip, arena );
+			touching = b3UpdateConvexContact( world, workerIndex, contact, &childShapeA, xfChild, shapeB, xfB, flip, isFast, arena );
 		}
 		else if ( child.type == b3_meshShape )
 		{
@@ -829,12 +836,12 @@ bool b3UpdateContact( b3World* world, int workerIndex, b3Contact* contact, b3Sha
 			{
 				// Flip
 				bool flip = true;
-				touching = b3UpdateConvexContact( world, workerIndex, contact, shapeB, xfB, &childShapeA, xfA, flip, arena );
+				touching = b3UpdateConvexContact( world, workerIndex, contact, shapeB, xfB, &childShapeA, xfA, flip, isFast, arena );
 			}
 			else
 			{
 				bool flip = false;
-				touching = b3UpdateConvexContact( world, workerIndex, contact, &childShapeA, xfA, shapeB, xfB, flip, arena );
+				touching = b3UpdateConvexContact( world, workerIndex, contact, &childShapeA, xfA, shapeB, xfB, flip, isFast, arena );
 			}
 		}
 
@@ -875,7 +882,7 @@ bool b3UpdateContact( b3World* world, int workerIndex, b3Contact* contact, b3Sha
 	{
 		// Convex-vs-convex
 		bool flip = false;
-		touching = b3UpdateConvexContact( world, workerIndex, contact, shapeA, xfA, shapeB, xfB, flip, arena );
+		touching = b3UpdateConvexContact( world, workerIndex, contact, shapeA, xfA, shapeB, xfB, flip, isFast, arena );
 	}
 
 	if ( touching )

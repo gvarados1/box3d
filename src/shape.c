@@ -2380,22 +2380,56 @@ b3TOIOutput b3ShapeTimeOfImpact( b3Shape* shapeA, b3Shape* shapeB, b3Sweep* swee
 
 	b3TOIOutput output = b3TimeOfImpact( &input );
 
-#if 0
-	// todo I'm not sure this is worth it for convex vs convex.
-	if (0.0f < output.fraction && output.fraction < maxFraction)
+	if ( output.fraction == 0.0f && shapeB->type == b3_hullShape )
 	{
-		return output;
-	}
+		// A hull proxy carries radius zero, so b3TimeOfImpact reports overlap the instant the
+		// surfaces graze and it reports a hit at t1 = 0 whenever the step starts within
+		// B3_LINEAR_SLOP of the other shape. Both come back as fraction 0, and the continuous
+		// solver only accepts 0 < fraction, so the body advances the whole step and tunnels.
+		//
+		// That start state is not exotic: the impact pose from the previous step's TOI sits at
+		// exactly the target separation, and a resting body is allowed to penetrate by the slop.
+		// A fast hull therefore loses continuous collision on the step right after it first
+		// touches anything.
+		//
+		// Rounded shapes are immune because their proxy radius keeps the core clouds apart, which
+		// is why spheres and capsules never showed this. Give the hull the same property: retry
+		// against a sphere around its centroid, which cannot overlap until the centroid itself is
+		// inside. This is what the mesh path above already does, and meshes do not tunnel.
+		// Use the full inscribed radius. That sphere is contained in the hull, so it can never
+		// report an impact earlier than the real geometry would, and it is the largest sphere
+		// with that property - anything smaller just lets the hull sink further before stopping.
+		// Read innerRadius directly rather than calling b3ComputeShapeExtent, which would also
+		// loop every vertex to build a maxExtent this path discards.
+		float fallbackRadius = b3MaxFloat( shapeB->hull->innerRadius, B3_LINEAR_SLOP );
 
-	if (0.0f == output.fraction)
-	{
-		// fallback to TOI of a small circle around the fast shape centroid
-		b3Vec3 centroid = b3GetShapeCentroid( shapeB );
-		input.proxyB = ( b3ShapeProxy ){ &centroid, 1, B3_SPECULATIVE_DISTANCE };
-		output = b3TimeOfImpact( &input );
-		return output;
+		// Only ask the second question if the body could actually get past something this step.
+		// The sweep translation is the whole step's motion, so a body that moves less than its own
+		// inscribed radius cannot end up on the far side of anything and the speculative contact
+		// already covers it.
+		//
+		// This guard is not a micro-optimization, it is the difference between a fix that is free
+		// and one that taxes the whole game. A body resting on a surface sits within
+		// B3_LINEAR_SLOP of it, which is precisely the condition that makes the exact query report
+		// a hit at t1 = 0 - so without this, every settled body that is moving fast enough to be
+		// flagged b3_isFast pays for a second time of impact query on every step, forever. On a
+		// conveyor that is the entire awake set: a 1.6 m/s belt moves an item 32 mm per step
+		// against a 47 mm inscribed radius, so the guard skips them all, while a body falling at
+		// 30 m/s covers 600 mm and still gets the fallback it needs.
+		b3Vec3 translation = b3Sub( b3Sub( sweepB->c2, sweepB->c1 ), b3Sub( sweepA->c2, sweepA->c1 ) );
+		if ( b3LengthSquared( translation ) > fallbackRadius * fallbackRadius )
+		{
+			b3Vec3 centroid = b3GetShapeCentroid( shapeB );
+			input.proxyB = (b3ShapeProxy){ &centroid, 1, fallbackRadius };
+
+			b3TOIOutput fallback = b3TimeOfImpact( &input );
+			if ( 0.0f < fallback.fraction && fallback.fraction < maxFraction )
+			{
+				fallback.usedFallback = true;
+				return fallback;
+			}
+		}
 	}
-#endif
 
 	return output;
 }
