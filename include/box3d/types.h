@@ -8,6 +8,7 @@
 #include "id.h"
 #include "math_functions.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define B3_DEFAULT_CATEGORY_BITS UINT64_MAX
@@ -912,7 +913,9 @@ typedef struct b3SphericalJointDef
 	/// The maximum motor torque, typically in newton-meters. Non-negative number.
 	float maxMotorTorque;
 
-	/// The desired motor angular velocity in radians per second.
+	/// The desired motor angular velocity in radians per second. This is the relative angular
+	/// velocity between the two bodies in world space.
+	/// motorVelocity = angularVelocityB - angularVelocityA
 	b3Vec3 motorVelocity;
 } b3SphericalJointDef;
 
@@ -1620,31 +1623,31 @@ typedef enum b3TOIState
 	b3_toiStateSeparated
 } b3TOIState;
 
-/// Time of impact output
+/// Time of impact output.
 typedef struct b3TOIOutput
 {
-	/// The type of result
+	/// The type of result.
 	b3TOIState state;
 
-	/// The hit point
+	/// The hit point. A shared point if overlapped.
 	b3Vec3 point;
 
-	/// The hit normal
+	/// The hit normal. Zero if overlapped.
 	b3Vec3 normal;
 
-	/// The sweep time of the collision
+	/// The sweep time of the collision. 0 if overlapped.
 	float fraction;
 
-	/// The final distance
+	/// The final distance. 0 if overlapped.
 	float distance;
 
-	/// Number of outer iterations
+	/// Number of outer iterations.
 	int distanceIterations;
 
-	/// Total number of push back iterations
+	/// Total number of push back iterations.
 	int pushBackIterations;
 
-	/// Total number of root iterations
+	/// Total number of root iterations.
 	int rootIterations;
 
 	/// Indicates that the time of impact detected initial
@@ -1817,6 +1820,15 @@ typedef struct b3PlaneResult
 	/// Closest point on the shape. May not be unique.
 	b3Vec3 point;
 
+	/// The index of the mesh or height field triangle hit.
+	int triangleIndex;
+
+	/// The index of the compound child shape.
+	int childIndex;
+
+	/// The material index.
+	int materialIndex;
+
 } b3PlaneResult;
 
 /// These are collision planes that can be fed to b3SolvePlanes. Normally
@@ -1856,6 +1868,22 @@ typedef struct b3BodyPlaneResult
 	/// The plane result.
 	b3PlaneResult result;
 } b3BodyPlaneResult;
+
+/// Body time of impact result for movers.
+typedef struct b3BodyTOIResult
+{
+	/// The hit point in world space.
+	b3Pos point;
+
+	/// The hit normal. Points from the body to the mover.
+	b3Vec3 normal;
+
+	/// The sweep time of the collision.
+	float fraction;
+
+	/// The hit shape.
+	b3ShapeId shapeId;
+} b3BodyTOIResult;
 
 /// Used to collect collision planes for character movers.
 /// Return true to continue gathering planes.
@@ -2068,7 +2096,10 @@ typedef struct b3MeshDef
 	/// Triangle vertices.
 	b3Vec3* vertices;
 
-	/// Triangle vertex indices. 3 for each triangle. CCW winding.
+	/// Stride between vertices. Use 0 for contiguous vertices.
+	size_t stride;
+
+	/// Triangle vertex indices. 3 for each triangle. CCW winding unless CW is indicated below.
 	int32_t* indices;
 
 	/// Triangle material index. 1 per triangle. Indexes into b3ShapeDef::materials.
@@ -2094,6 +2125,9 @@ typedef struct b3MeshDef
 
 	/// Compute triangle adjacency information using shared edges
 	bool identifyEdges;
+
+	/// Input indices have clockWise winding order.
+	bool clockWiseWinding;
 } b3MeshDef;
 
 /// 64-bit mesh version. Useful for validating serialized data.

@@ -1712,3 +1712,87 @@ public:
 };
 
 static int sampleConveyorSeamGhost = RegisterSample( "Issues", "Conveyor Seam Ghost", ConveyorSeamGhost::Create );
+
+// Very large dynamic bodies have overflow when computing the inertia tensor.
+class HugeBox : public Sample
+{
+public:
+	explicit HugeBox( SampleContext* context )
+		: Sample( context )
+	{
+		if ( context->restart == false )
+		{
+			m_camera->SetView( 0.0f, 25.0f, 10.0f, b3Pos_zero );
+		}
+
+		AddGroundBox( 400.0f );
+
+		{
+			float a = 100.0f;
+
+			b3BoxHull cube = b3MakeCubeHull( a );
+			b3BodyDef bodyDef = b3DefaultBodyDef();
+			bodyDef.name = "cube";
+			bodyDef.type = b3_dynamicBody;
+			bodyDef.position = { 0.0f, a, 0.0f };
+			bodyDef.rotation = b3MakeQuatFromAxisAngle( { 0.0f, 0.0f, 1.0f }, 0.2f );
+			m_bodyId = b3CreateBody( m_worldId, &bodyDef );
+
+			b3ShapeDef shapeDef = b3DefaultShapeDef();
+			b3CreateHullShape( m_bodyId, &shapeDef, &cube.base );
+		}
+	}
+
+	static Sample* Create( SampleContext* context )
+	{
+		return new HugeBox( context );
+	}
+
+	b3BodyId m_bodyId;
+};
+
+static int sampleHugeBox = RegisterSample( "Issues", "Huge Box", HugeBox::Create );
+
+// This demonstrates this cap on mesh complexity. B3_MAX_MESH_CONTACT_TRIANGLES
+// It generates this warning:
+// Box3D: WARNING: complex mesh detected, triangle buffer capacity of 256 reached
+class HeightfieldIssue : public Sample
+{
+public:
+	explicit HeightfieldIssue( SampleContext* context )
+		: Sample( context )
+	{
+		if ( context->restart == false )
+		{
+			m_camera->SetView( -90.0f, 5.0f, 50.0f, { 50.0f, 10.0f, 50.0f } );
+		}
+
+		b3ShapeDef shapeDef = b3DefaultShapeDef();
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+
+		m_heightField = b3CreateGrid( 100, 100, { 1, 1, 1 }, false );
+		b3BodyId groundId = b3CreateBody( m_worldId, &bodyDef );
+		b3CreateHeightFieldShape( groundId, &shapeDef, m_heightField );
+
+		b3HullData* hull = b3CreateCylinder( 20, 5, -10, 24 );
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = { 50, 20, 50 };
+		bodyDef.rotation = b3MakeQuatFromAxisAngle( b3Vec3_axisX, B3_PI / 4 );
+		b3BodyId bodyId = b3CreateBody( m_worldId, &bodyDef );
+		b3CreateHullShape( bodyId, &shapeDef, hull );
+		b3DestroyHull( hull );
+	}
+
+	~HeightfieldIssue() override
+	{
+		b3DestroyHeightField( m_heightField );
+	}
+
+	static Sample* Create( SampleContext* context )
+	{
+		return new HeightfieldIssue( context );
+	}
+
+	b3HeightFieldData* m_heightField;
+};
+static int sampleIssueIndex = RegisterSample( "Issues", "Heightfield", HeightfieldIssue::Create );

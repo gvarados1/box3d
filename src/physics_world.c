@@ -609,9 +609,7 @@ static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* 
 			continue;
 		}
 
-		// Update contact respecting shape/body order (A,B). Bodies behind awake-set
-		// contacts are always either awake or static - inline b3GetBodySim with that
-		// invariant to skip the cross-TU call and per-call solverSets indirection.
+		// Update contact respecting shape/body order (A,B)
 		b3Body* bodyA = bodies + shapeA->bodyId;
 		b3Body* bodyB = bodies + shapeB->bodyId;
 		bool isStaticA = bodyA->type == b3_staticBody;
@@ -2816,7 +2814,6 @@ void b3World_CollideMover( b3WorldId worldId, b3Pos origin, const b3Capsule* mov
 
 	b3Vec3 r = { mover->radius, mover->radius, mover->radius };
 
-	// Relative box lifted to world float with outward rounding, conservative for the tree
 	b3AABB relBox;
 	relBox.lowerBound = b3Sub( b3Min( mover->center1, mover->center2 ), r );
 	relBox.upperBound = b3Add( b3Max( mover->center1, mover->center2 ), r );
@@ -2833,7 +2830,6 @@ void b3World_CollideMover( b3WorldId worldId, b3Pos origin, const b3Capsule* mov
 
 	if ( world->recording != NULL )
 	{
-		// CollideMover returns void: no treestats tail, just the per-shape plane batches.
 		b3RecPatchU32( &recWriter.buf, recWriter.countOffset, recWriter.hitCount );
 		b3RecQueryCommit( world->recording, b3_recOpQueryCollideMover, &recWriter );
 	}
