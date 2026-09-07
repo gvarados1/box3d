@@ -9,6 +9,7 @@
 
 #include "box3d/types.h"
 
+#include <float.h>
 #include <stdio.h>
 
 #define B3_MAX_POINTS_PER_TRIANGLE 32
@@ -521,6 +522,200 @@ typedef struct b3Cluster
 	bool grazing;
 } b3Cluster;
 
+// Ghost penetration at a convex edge. A face contact measures depth against the triangle's
+// infinite plane. When an item rests on the neighbouring face across a convex edge - a rod on a
+// ramp that ends in a vertical drop face - the moment the item's centre crosses the drop face's
+// plane that triangle is no longer back-face culled, and its face contact reports the item's far
+// end as tens of centimetres inside it. The solver then pushes the item out at the contact speed
+// cap: the item is launched and spun. But the item is not inside the solid at all, it is in front
+// of the neighbouring face. So for any point deeper than the slop, test it against the planes of
+// the triangles that share a convex edge with this one and drop it if it lies in front of (or
+// within slop of) any of them. Flat and concave edges are left alone: a point behind both faces
+// at a concave edge really is inside.
+//
+// Neighbours come from the contact's triangle cache (everything overlapping the item's bounds),
+// so a neighbour that is not cached leaves the point as it was. Nothing runs unless a point is
+// deeper than twice the slop, so resting contacts never pay for this.
+static void b3CullConvexEdgeGhosts( b3LocalManifold* manifold, const b3Triangle* triangle, int triangleIndex,
+									const b3Shape* shapeA, const b3TriangleCache* caches, int cacheCount,
+									b3Transform transformAtoB, b3ShapeType typeB )
+{
+	const float deepSeparation = -2.0f * B3_LINEAR_SLOP;
+
+	int pointCount = manifold->pointCount;
+	float minSeparation = FLT_MAX;
+	for ( int i = 0; i < pointCount; ++i )
+	{
+		minSeparation = b3MinFloat( minSeparation, manifold->points[i].separation );
+	}
+
+	if ( minSeparation >= deepSeparation )
+	{
+		return;
+	}
+
+	// A mirrored mesh remaps its edge flags in b3GetMeshTriangle and loses the distinction
+	// between a convex edge and an unidentified one, so leave it alone.
+	if ( shapeA->type == b3_meshShape )
+	{
+		b3Vec3 scale = shapeA->mesh.scale;
+		if ( scale.x * scale.y * scale.z < 0.0f )
+		{
+			return;
+		}
+	}
+
+	// A face is usually several coplanar triangles joined by flat edges, and the convex edges
+	// that bound the face may all belong to a sibling (a quad's second triangle only touches the
+	// diagonal and two of the four sides). Walk the flat edges within the cache to gather the face,
+	// and collect the planes of the triangles across its convex edges. Both walks are bounded.
+	const int concaveBits[3] = { b3_concaveEdge1, b3_concaveEdge2, b3_concaveEdge3 };
+	const int inverseBits[3] = { b3_inverseConcaveEdge1, b3_inverseConcaveEdge2, b3_inverseConcaveEdge3 };
+
+	enum
+	{
+		maxGroup = 8,
+		maxPlanes = 8
+	};
+	int groupIndices[maxGroup];
+	b3Triangle groupTriangles[maxGroup];
+	int groupCount = 1;
+	groupIndices[0] = triangleIndex;
+	groupTriangles[0] = *triangle;
+
+	b3Plane neighborPlanes[maxPlanes];
+	int neighborCount = 0;
+
+	for ( int g = 0; g < groupCount; ++g )
+	{
+		b3Triangle member = groupTriangles[g];
+		int flags = member.flags;
+		const int edgeStart[3] = { member.i1, member.i2, member.i3 };
+		const int edgeEnd[3] = { member.i2, member.i3, member.i1 };
+
+		for ( int j = 0; j < 3; ++j )
+		{
+			bool concave = ( flags & concaveBits[j] ) != 0;
+			bool inverse = ( flags & inverseBits[j] ) != 0;
+			bool flat = concave && inverse;
+			bool convex = inverse && concave == false;
+
+			if ( flat == false && convex == false )
+			{
+				continue;
+			}
+
+			if ( flat && groupCount == maxGroup )
+			{
+				continue;
+			}
+
+			if ( convex && neighborCount == maxPlanes )
+			{
+				continue;
+			}
+
+			int a = edgeStart[j];
+			int b = edgeEnd[j];
+
+			for ( int k = 0; k < cacheCount; ++k )
+			{
+				int otherIndex = caches[k].triangleIndex;
+
+				bool inGroup = false;
+				for ( int m = 0; m < groupCount; ++m )
+				{
+					if ( groupIndices[m] == otherIndex )
+					{
+						inGroup = true;
+						break;
+					}
+				}
+
+				if ( inGroup )
+				{
+					continue;
+				}
+
+				b3Triangle other;
+				if ( shapeA->type == b3_meshShape )
+				{
+					other = b3GetMeshTriangle( &shapeA->mesh, otherIndex );
+				}
+				else
+				{
+					other = b3GetHeightFieldTriangle( shapeA->heightField, otherIndex );
+				}
+
+				bool hasA = other.i1 == a || other.i2 == a || other.i3 == a;
+				bool hasB = other.i1 == b || other.i2 == b || other.i3 == b;
+				if ( hasA == false || hasB == false )
+				{
+					continue;
+				}
+
+				if ( flat )
+				{
+					groupIndices[groupCount] = otherIndex;
+					groupTriangles[groupCount] = other;
+					groupCount += 1;
+				}
+				else
+				{
+					// Mesh frame, matching the triangle vertices the cache holds.
+					b3Vec3 normal = b3MakeNormalFromPoints( other.vertices[0], other.vertices[1], other.vertices[2] );
+					neighborPlanes[neighborCount].normal = normal;
+					neighborPlanes[neighborCount].offset = b3Dot( normal, other.vertices[0] );
+					neighborCount += 1;
+				}
+				break;
+			}
+		}
+	}
+
+	if ( neighborCount == 0 )
+	{
+		return;
+	}
+
+	// Hull face contacts store the hull's own surface point. Every other builder stores the
+	// midpoint between the two surfaces, so the item's surface is half a separation further
+	// along the normal (which points from the triangle to the item).
+	bool pointOnItem =
+		typeB == b3_hullShape && ( manifold->feature == b3_featureTriangleFace || manifold->feature == b3_featureHullFace );
+
+	int keptCount = 0;
+	for ( int i = 0; i < pointCount; ++i )
+	{
+		b3LocalManifoldPoint point = manifold->points[i];
+		bool keep = true;
+
+		if ( point.separation < deepSeparation )
+		{
+			b3Vec3 itemPoint = pointOnItem ? point.point : b3MulAdd( point.point, 0.5f * point.separation, manifold->normal );
+			b3Vec3 meshPoint = b3InvTransformPoint( transformAtoB, itemPoint );
+
+			for ( int n = 0; n < neighborCount; ++n )
+			{
+				float neighborSeparation = b3Dot( neighborPlanes[n].normal, meshPoint ) - neighborPlanes[n].offset;
+				if ( neighborSeparation > -B3_LINEAR_SLOP )
+				{
+					keep = false;
+					break;
+				}
+			}
+		}
+
+		if ( keep )
+		{
+			manifold->points[keptCount] = point;
+			keptCount += 1;
+		}
+	}
+
+	manifold->pointCount = keptCount;
+}
+
 bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact, const b3Shape* shapeA, const int* materialMap,
 							 b3WorldTransform xfA, const b3Shape* shapeB, b3WorldTransform xfB, bool isFast, b3Arena arena )
 {
@@ -639,6 +834,18 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 		if ( manifoldPointCount > 0 )
 		{
 			B3_ASSERT( manifold->feature != b3_featureNone );
+
+#if B3_CULL_CONVEX_EDGE_GHOSTS
+			// Depth measured against this triangle's infinite plane is a ghost when the item is
+			// really outside the solid across one of the triangle's convex edges.
+			b3CullConvexEdgeGhosts( manifold, &triangle, triangleIndex, shapeA, triangleCaches, triangleCount, transformAtoB,
+									shapeB->type );
+			manifoldPointCount = manifold->pointCount;
+			if ( manifoldPointCount == 0 )
+			{
+				continue;
+			}
+#endif
 
 			b3Vec3 triangleNormal = b3MakeNormalFromPoints( vertices[0], vertices[1], vertices[2] );
 

@@ -102,6 +102,15 @@ B3_API float b3GetStallThreshold( void );
 #define B3_GRAZING_FACE_ALIGNMENT 0.9f
 #endif
 
+/// Mesh face contacts measure depth against the triangle's infinite plane. A shape resting on the
+/// neighbouring face across a convex edge (a rod on a ramp that ends in a drop face) can read as
+/// deeply inside a triangle it is nowhere near inside, and the solver launches it. With this on,
+/// deep contact points that lie in front of a convex neighbour's plane are discarded.
+/// Set to 0 to disable.
+#ifndef B3_CULL_CONVEX_EDGE_GHOSTS
+#define B3_CULL_CONVEX_EDGE_GHOSTS 1
+#endif
+
 /// The default contact recycling distance.
 #define B3_CONTACT_RECYCLE_DISTANCE ( 10.0f * B3_LINEAR_SLOP )
 
