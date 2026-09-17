@@ -3,6 +3,7 @@
 
 #include "compound.h"
 
+#include "dynamic_tree.h"
 #include "hull.h"
 #include "math_internal.h"
 #include "shape.h"
@@ -50,6 +51,16 @@ static inline b3TreeNode* b3GetCompoundNodes( b3CompoundData* compound )
 	}
 
 	return (b3TreeNode*)( (intptr_t)compound + compound->nodeOffset );
+}
+
+static inline b3TreeProxy* b3GetCompoundProxies( b3CompoundData* compound )
+{
+	if ( compound->proxyOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (b3TreeProxy*)( (intptr_t)compound + compound->proxyOffset );
 }
 
 const b3SurfaceMaterial* b3GetCompoundMaterials( const b3CompoundData* compound )
@@ -274,13 +285,13 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 
 	// Instances
 	int capsuleCount = def->capsuleCount;
-	b3CompoundCapsule* capsuleInstances = b3AllocZeroed( capsuleCount * sizeof( b3CompoundCapsule ) );
+	b3CompoundCapsule* capsuleInstances = b3AllocZero( capsuleCount * sizeof( b3CompoundCapsule ) );
 	int hullCount = def->hullCount;
-	b3HullInstance* hullInstances = b3AllocZeroed( hullCount * sizeof( b3HullInstance ) );
+	b3HullInstance* hullInstances = b3AllocZero( hullCount * sizeof( b3HullInstance ) );
 	int meshCount = def->meshCount;
-	b3MeshInstance* meshInstances = b3AllocZeroed( meshCount * sizeof( b3MeshInstance ) );
+	b3MeshInstance* meshInstances = b3AllocZero( meshCount * sizeof( b3MeshInstance ) );
 	int sphereCount = def->sphereCount;
-	b3CompoundSphere* sphereInstances = b3AllocZeroed( sphereCount * sizeof( b3CompoundSphere ) );
+	b3CompoundSphere* sphereInstances = b3AllocZero( sphereCount * sizeof( b3CompoundSphere ) );
 
 	// Determine material capacity.
 	int materialCapacity = convexCount;
@@ -294,7 +305,7 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	b3MaterialMap materialMap;
 	b3MaterialMap_init( &materialMap );
 	b3MaterialMap_reserve( &materialMap, materialCapacity );
-	b3SurfaceMaterial* materials = b3AllocZeroed( materialCapacity * sizeof( b3SurfaceMaterial ) );
+	b3SurfaceMaterial* materials = b3AllocZero( materialCapacity * sizeof( b3SurfaceMaterial ) );
 	int materialCount = 0;
 
 	for ( int i = 0; i < def->capsuleCount; ++i )
@@ -322,7 +333,7 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	}
 
 	// Hulls
-	b3SharedHull* sharedHulls = b3AllocZeroed( hullCount * sizeof( b3SharedHull ) );
+	b3SharedHull* sharedHulls = b3AllocZero( hullCount * sizeof( b3SharedHull ) );
 	int sharedHullCount = 0;
 
 	if ( hullCount > 0 )
@@ -378,7 +389,7 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	}
 
 	// Meshes
-	b3SharedMesh* sharedMeshes = b3AllocZeroed( meshCount * sizeof( b3SharedMesh ) );
+	b3SharedMesh* sharedMeshes = b3AllocZero( meshCount * sizeof( b3SharedMesh ) );
 	int sharedMeshCount = 0;
 
 	if ( meshCount > 0 )
@@ -471,14 +482,16 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	}
 
 	B3_ASSERT( materialCount <= materialCapacity );
-	B3_ASSERT( tree.nodeCount > 0 );
+	B3_ASSERT( tree.proxyCount > 0 );
 
 	b3DynamicTree_Rebuild( &tree, true );
 
-	// Tree nodes
+	// Tree nodes and proxies. The rebuild is dense, so only the live nodes travel.
 	size_t byteCount = b3AlignUp8( sizeof( b3CompoundData ) );
 	int nodeOffset = (int)byteCount;
-	byteCount += b3AlignUp8( tree.nodeCapacity * sizeof( b3TreeNode ) );
+	byteCount += b3AlignUp8( tree.nodeEnd * sizeof( b3TreeNode ) );
+	int proxyOffset = (int)byteCount;
+	byteCount += b3AlignUp8( tree.proxyCount * sizeof( b3TreeProxy ) );
 	int materialOffset = (int)byteCount;
 	byteCount += b3AlignUp8( materialCount * sizeof( b3SurfaceMaterial ) );
 	int capsuleOffset = (int)byteCount;
@@ -525,17 +538,25 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	compound->version = B3_COMPOUND_VERSION;
 	compound->byteCount = (int)byteCount;
 	compound->nodeOffset = nodeOffset;
+	compound->proxyOffset = proxyOffset;
 	memcpy( &compound->tree, &tree, sizeof( b3DynamicTree ) );
 
 	// todo clean up this mess
-	compound->tree.freeList = 0;
+	compound->tree.nodeCapacity = tree.nodeEnd;
+	compound->tree.pairFreeList = B3_NULL_INDEX;
+	compound->tree.proxyCapacity = tree.proxyCount;
+	compound->tree.proxyFreeList = B3_NULL_INDEX;
+	compound->tree.swapNodes = NULL;
 	compound->tree.leafIndices = NULL;
+	compound->tree.leafNodes = NULL;
 	compound->tree.leafBoxes = NULL;
 	compound->tree.leafCenters = NULL;
 	compound->tree.binIndices = NULL;
 	compound->tree.rebuildCapacity = 0;
 
 	compound->tree.nodes = NULL;
+	compound->tree.parents = NULL;
+	compound->tree.proxies = NULL;
 	compound->materialOffset = materialOffset;
 	compound->materialCount = materialCount;
 	compound->capsuleOffset = capsuleOffset;
@@ -547,10 +568,14 @@ b3CompoundData* b3CreateCompound( const b3CompoundDef* def )
 	compound->sphereOffset = sphereOffset;
 	compound->sphereCount = sphereCount;
 
-	// Tree nodes
+	// Tree nodes and proxies
 	b3TreeNode* nodes = b3GetCompoundNodes( compound );
-	memcpy( nodes, tree.nodes, tree.nodeCapacity * sizeof( b3TreeNode ) );
+	memcpy( nodes, tree.nodes, tree.nodeEnd * sizeof( b3TreeNode ) );
 	compound->tree.nodes = nodes;
+
+	b3TreeProxy* proxies = b3GetCompoundProxies( compound );
+	memcpy( proxies, tree.proxies, tree.proxyCount * sizeof( b3TreeProxy ) );
+	compound->tree.proxies = proxies;
 
 	// Materials
 	B3_ASSERT( materialCount > 0 );
@@ -638,8 +663,9 @@ void b3DestroyCompound( b3CompoundData* compound )
 
 uint8_t* b3ConvertCompoundToBytes( b3CompoundData* compound )
 {
-	// scrub this pointer before serialization
+	// scrub these pointers before serialization
 	compound->tree.nodes = NULL;
+	compound->tree.proxies = NULL;
 	return (uint8_t*)compound;
 }
 
@@ -661,13 +687,14 @@ b3CompoundData* b3ConvertBytesToCompound( uint8_t* bytes, int byteCount )
 		return NULL;
 	}
 
-	if ( compound->nodeOffset <= 0 )
+	if ( compound->nodeOffset <= 0 || compound->proxyOffset <= 0 )
 	{
 		return NULL;
 	}
 
 	// this mutates the input bytes
 	compound->tree.nodes = (b3TreeNode*)( (intptr_t)compound + compound->nodeOffset );
+	compound->tree.proxies = (b3TreeProxy*)( (intptr_t)compound + compound->proxyOffset );
 	return compound;
 }
 
@@ -676,8 +703,7 @@ b3AABB b3ComputeCompoundAABB( const b3CompoundData* shape, b3Transform transform
 	B3_ASSERT( shape->nodeOffset > 0 );
 
 	const b3TreeNode* nodes = (const b3TreeNode*)( (intptr_t)shape + shape->nodeOffset );
-	int root = shape->tree.root;
-	b3AABB aabb = nodes[root].aabb;
+	b3AABB aabb = nodes[B3_ROOT_NODE].aabb;
 	return b3AABB_Transform( transform, aabb );
 }
 
