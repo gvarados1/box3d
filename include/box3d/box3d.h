@@ -244,6 +244,11 @@ B3_API void b3World_SetAngularVelocities( b3WorldId worldId, const b3BodyId* bod
 B3_API void b3World_ApplyForcesToCenter( b3WorldId worldId, const b3BodyId* bodyIds, const b3Vec3* forces, int count, bool wake );
 B3_API void b3World_WakeBodies( b3WorldId worldId, const b3BodyId* bodyIds, int count );
 
+/// MineMogul fork: which broad-phase trees sensors query each step, one bit per body type (1 << b3_staticBody and so on).
+/// All three by default. A game whose static shapes are never sensor visitors drops the static tree, the largest, from every sensor.
+B3_API void b3World_SetSensorTreeMask( b3WorldId worldId, uint32_t mask );
+B3_API uint32_t b3World_GetSensorTreeMask( b3WorldId worldId );
+
 /// Dump memory stats to log.
 B3_API void b3World_DumpMemoryStats( b3WorldId worldId );
 

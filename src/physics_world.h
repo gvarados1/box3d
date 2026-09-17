@@ -234,6 +234,9 @@ typedef struct b3World
 	float contactDampingRatio;
 	float contactRecycleDistance;
 
+	// MineMogul fork: which broad-phase trees sensors query, one bit per body type (b3World_SetSensorTreeMask).
+	uint32_t sensorTreeMask;
+
 	b3FrictionCallback* frictionCallback;
 	b3RestitutionCallback* restitutionCallback;
 

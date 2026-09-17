@@ -548,6 +548,47 @@ static int BatchWrites( void )
 	return 0;
 }
 
+// MineMogul fork: sensors query only the trees the mask names. The default queries all three; a mask
+// without the dynamic tree must not see a dynamic visitor, and one with it must.
+static int SensorTreeMask( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	ENSURE( b3World_GetSensorTreeMask( worldId ) == 0x7u );
+
+	b3BodyDef sensorDef = b3DefaultBodyDef();
+	sensorDef.type = b3_staticBody;
+	b3BodyId sensorBody = b3CreateBody( worldId, &sensorDef );
+	b3ShapeDef sensorShape = b3DefaultShapeDef();
+	sensorShape.isSensor = true;
+	sensorShape.enableSensorEvents = true;
+	b3Sphere sensorSphere = { b3Vec3_zero, 1.0f };
+	b3CreateSphereShape( sensorBody, &sensorShape, &sensorSphere );
+
+	b3BodyDef visitorDef = b3DefaultBodyDef();
+	visitorDef.type = b3_dynamicBody;
+	visitorDef.position = (b3Pos){ 0.0f, 0.5f, 0.0f };
+	b3BodyId visitorBody = b3CreateBody( worldId, &visitorDef );
+	b3ShapeDef visitorShape = b3DefaultShapeDef();
+	visitorShape.enableSensorEvents = true;
+	b3Sphere visitorSphere = { b3Vec3_zero, 0.25f };
+	b3CreateSphereShape( visitorBody, &visitorShape, &visitorSphere );
+
+	// Static and kinematic trees only: the dynamic visitor is invisible.
+	b3World_SetSensorTreeMask( worldId, ( 1u << b3_staticBody ) | ( 1u << b3_kinematicBody ) );
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	ENSURE( b3World_GetSensorEvents( worldId ).beginCount == 0 );
+
+	// Dynamic tree only: the overlap is found without the static tree.
+	b3World_SetSensorTreeMask( worldId, 1u << b3_dynamicBody );
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	ENSURE( b3World_GetSensorEvents( worldId ).beginCount == 1 );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 int BodyTest( void )
 {
 	RUN_SUBTEST( FarSingleSphereMass );
@@ -560,5 +601,6 @@ int BodyTest( void )
 	RUN_SUBTEST( SetMassDataConsistentVelocity );
 	RUN_SUBTEST( ShapeExtents );
 	RUN_SUBTEST( BatchWrites );
+	RUN_SUBTEST( SensorTreeMask );
 	return 0;
 }

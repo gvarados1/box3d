@@ -159,3 +159,22 @@ void b3World_WakeBodies( b3WorldId worldId, const b3BodyId* bodyIds, int count )
 		}
 	}
 }
+
+// Sensor tree mask (box3d.h). Not recorded: a replay queries every tree, which yields the same events
+// whenever the skipped trees hold no sensor visitors, the only case the mask exists for.
+void b3World_SetSensorTreeMask( b3WorldId worldId, uint32_t mask )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	world->sensorTreeMask = mask & 0x7u;
+}
+
+uint32_t b3World_GetSensorTreeMask( b3WorldId worldId )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	return world->sensorTreeMask;
+}

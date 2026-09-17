@@ -330,6 +330,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->contactHertz = def->contactHertz;
 	world->contactDampingRatio = def->contactDampingRatio;
 	world->contactRecycleDistance = B3_CONTACT_RECYCLE_DISTANCE;
+	world->sensorTreeMask = 0x7u;
 
 	if ( def->frictionCallback == NULL )
 	{
