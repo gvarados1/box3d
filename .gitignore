@@ -9,9 +9,9 @@ settings.ini
 CMakeUserPresets.json
 .cache/
 .idea/
-.claude/
 .tmp/
 .fetchcontent-cache/
 *.b3rec
 Superluminal/
 AGENTS.md
+*.zip
