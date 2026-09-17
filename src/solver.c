@@ -735,6 +735,8 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 
 		moveEvents[simIndex].userData = body->userData;
 		moveEvents[simIndex].transform = sim->transform;
+		moveEvents[simIndex].linearVelocity = state->linearVelocity;
+		moveEvents[simIndex].angularVelocity = state->angularVelocity;
 		moveEvents[simIndex].bodyId = (b3BodyId){ sim->bodyId + 1, worldId, body->generation };
 		moveEvents[simIndex].fellAsleep = false;
 

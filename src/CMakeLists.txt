@@ -6,6 +6,7 @@ set(BOX3D_SOURCE_FILES
 	algorithm.h
 	arena_allocator.c
 	arena_allocator.h
+	batch.c
 	bitset.c
 	bitset.h
 	block_allocator.c

@@ -475,6 +475,79 @@ static int ShapeExtents( void )
 	return 0;
 }
 
+// MineMogul fork: the array writers must match the single-body calls entry for entry, the move
+// events must carry the end-of-step velocities, and a destroyed body's id must be skipped, not asserted on.
+static int BatchWrites( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3Sphere sphere = { b3Vec3_zero, 0.5f };
+
+	b3BodyId ids[3];
+	for ( int i = 0; i < 3; ++i )
+	{
+		bodyDef.position = (b3Pos){ 3.0f * i, 0.0f, 0.0f };
+		ids[i] = b3CreateBody( worldId, &bodyDef );
+		b3CreateSphereShape( ids[i], &shapeDef, &sphere );
+	}
+
+	// Batched velocities read back exactly.
+	b3Vec3 v[3] = { { 1.0f, 0.0f, 0.0f }, { 0.0f, 2.0f, 0.0f }, { 0.0f, 0.0f, 3.0f } };
+	b3World_SetLinearVelocities( worldId, ids, v, 3 );
+	b3World_SetAngularVelocities( worldId, ids, v, 3 );
+	for ( int i = 0; i < 3; ++i )
+	{
+		b3Vec3 lv = b3Body_GetLinearVelocity( ids[i] );
+		b3Vec3 av = b3Body_GetAngularVelocity( ids[i] );
+		ENSURE( lv.x == v[i].x && lv.y == v[i].y && lv.z == v[i].z );
+		ENSURE( av.x == v[i].x && av.y == v[i].y && av.z == v[i].z );
+	}
+
+	// A batched force accumulates like the single call: the same force on two equal bodies gives the same speed.
+	b3Vec3 force = { 0.0f, 0.0f, 10.0f };
+	b3World_ApplyForcesToCenter( worldId, ids, &force, 1, true );
+	b3Body_ApplyForceToCenter( ids[1], force, true );
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	b3Vec3 v0 = b3Body_GetLinearVelocity( ids[0] );
+	b3Vec3 v1 = b3Body_GetLinearVelocity( ids[1] );
+	ENSURE( v0.z > 0.0f );
+	ENSURE_SMALL( v0.z - v1.z, 1e-6f );
+
+	// Move events carry what the getters return after the step.
+	b3BodyEvents events = b3World_GetBodyEvents( worldId );
+	ENSURE( events.moveCount == 3 );
+	for ( int i = 0; i < events.moveCount; ++i )
+	{
+		const b3BodyMoveEvent* e = events.moveEvents + i;
+		b3Vec3 lv = b3Body_GetLinearVelocity( e->bodyId );
+		b3Vec3 av = b3Body_GetAngularVelocity( e->bodyId );
+		ENSURE( e->linearVelocity.x == lv.x && e->linearVelocity.y == lv.y && e->linearVelocity.z == lv.z );
+		ENSURE( e->angularVelocity.x == av.x && e->angularVelocity.y == av.y && e->angularVelocity.z == av.z );
+	}
+
+	// Batched wake.
+	b3Body_SetAwake( ids[2], false );
+	ENSURE( b3Body_IsAwake( ids[2] ) == false );
+	b3World_WakeBodies( worldId, ids + 2, 1 );
+	ENSURE( b3Body_IsAwake( ids[2] ) );
+
+	// A destroyed id in the array is skipped and the live entries still land.
+	b3DestroyBody( ids[1] );
+	b3Vec3 v2[3] = { { 5.0f, 0.0f, 0.0f }, { 6.0f, 0.0f, 0.0f }, { 7.0f, 0.0f, 0.0f } };
+	b3World_SetLinearVelocities( worldId, ids, v2, 3 );
+	ENSURE( b3Body_GetLinearVelocity( ids[0] ).x == 5.0f );
+	ENSURE( b3Body_GetLinearVelocity( ids[2] ).x == 7.0f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 int BodyTest( void )
 {
 	RUN_SUBTEST( FarSingleSphereMass );
@@ -486,5 +559,6 @@ int BodyTest( void )
 	RUN_SUBTEST( SetMassDataZeroMass );
 	RUN_SUBTEST( SetMassDataConsistentVelocity );
 	RUN_SUBTEST( ShapeExtents );
+	RUN_SUBTEST( BatchWrites );
 	return 0;
 }

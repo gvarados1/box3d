@@ -1225,6 +1225,11 @@ typedef struct b3BodyMoveEvent
 	/// The body transform.
 	b3WorldTransform transform;
 
+	/// End-of-step velocities, exactly what b3Body_GetLinearVelocity and b3Body_GetAngularVelocity return after the step.
+	/// MineMogul fork addition: lets the game read every awake body's velocity without a call per body.
+	b3Vec3 linearVelocity;
+	b3Vec3 angularVelocity;
+
 	/// The body id.
 	b3BodyId bodyId;
 

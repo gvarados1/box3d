@@ -236,6 +236,14 @@ B3_API void b3World_SetWorkerCount( b3WorldId worldId, int count );
 /// Get the worker count.
 B3_API int b3World_GetWorkerCount( b3WorldId worldId );
 
+/// MineMogul fork: array forms of the per-body write functions, one call per array instead of a native call per body.
+/// Each entry has the semantics of b3Body_SetLinearVelocity, b3Body_SetAngularVelocity, b3Body_ApplyForceToCenter or
+/// b3Body_SetAwake( true ), including recording. Stale ids and ids from another world are skipped.
+B3_API void b3World_SetLinearVelocities( b3WorldId worldId, const b3BodyId* bodyIds, const b3Vec3* velocities, int count );
+B3_API void b3World_SetAngularVelocities( b3WorldId worldId, const b3BodyId* bodyIds, const b3Vec3* velocities, int count );
+B3_API void b3World_ApplyForcesToCenter( b3WorldId worldId, const b3BodyId* bodyIds, const b3Vec3* forces, int count, bool wake );
+B3_API void b3World_WakeBodies( b3WorldId worldId, const b3BodyId* bodyIds, int count );
+
 /// Dump memory stats to log.
 B3_API void b3World_DumpMemoryStats( b3WorldId worldId );
 
