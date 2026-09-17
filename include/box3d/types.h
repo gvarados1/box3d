@@ -1295,6 +1295,16 @@ typedef struct b3ContactData
 	int manifoldCount;
 } b3ContactData;
 
+/// MineMogul fork: one awake contact from b3World_GetAwakeContacts. Not touching means the fat AABBs overlap
+/// but no manifold was produced this step; manifoldCount is then zero.
+typedef struct b3AwakeContact
+{
+	b3ShapeId shapeIdA;
+	b3ShapeId shapeIdB;
+	int manifoldCount;
+	int touching;
+} b3AwakeContact;
+
 /**@}*/ // event
 
 /**

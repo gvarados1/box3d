@@ -249,6 +249,10 @@ B3_API void b3World_WakeBodies( b3WorldId worldId, const b3BodyId* bodyIds, int 
 B3_API void b3World_SetSensorTreeMask( b3WorldId worldId, uint32_t mask );
 B3_API uint32_t b3World_GetSensorTreeMask( b3WorldId worldId );
 
+/// MineMogul fork: copy every awake contact, touching or not, into the caller's array and return the number written.
+/// awakeContactCount from b3World_GetCounters is the exact capacity. Diagnostic only; not recorded.
+B3_API int b3World_GetAwakeContacts( b3WorldId worldId, b3AwakeContact* contacts, int capacity );
+
 /// Dump memory stats to log.
 B3_API void b3World_DumpMemoryStats( b3WorldId worldId );
 

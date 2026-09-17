@@ -589,6 +589,51 @@ static int SensorTreeMask( void )
 	return 0;
 }
 
+static int ContactCensus( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.type = b3_staticBody;
+	b3BodyId groundBody = b3CreateBody( worldId, &groundDef );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3Sphere groundSphere = { b3Vec3_zero, 1.0f };
+	b3ShapeId groundShape = b3CreateSphereShape( groundBody, &shapeDef, &groundSphere );
+
+	// Four centimetres of clearance: inside the AABB margins, outside the speculative distance.
+	b3BodyDef itemDef = b3DefaultBodyDef();
+	itemDef.type = b3_dynamicBody;
+	itemDef.position = (b3Pos){ 0.0f, 1.29f, 0.0f };
+	b3BodyId itemBody = b3CreateBody( worldId, &itemDef );
+	b3Sphere itemSphere = { b3Vec3_zero, 0.25f };
+	b3ShapeId itemShape = b3CreateSphereShape( itemBody, &shapeDef, &itemSphere );
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	b3AwakeContact contacts[4];
+	int count = b3World_GetAwakeContacts( worldId, contacts, 4 );
+	ENSURE( count == 1 );
+	ENSURE( b3World_GetCounters( worldId ).awakeContactCount == 1 );
+	ENSURE( contacts[0].touching == 0 );
+	ENSURE( contacts[0].manifoldCount == 0 );
+	ENSURE( B3_ID_EQUALS( contacts[0].shapeIdA, groundShape ) || B3_ID_EQUALS( contacts[0].shapeIdB, groundShape ) );
+	ENSURE( B3_ID_EQUALS( contacts[0].shapeIdA, itemShape ) || B3_ID_EQUALS( contacts[0].shapeIdB, itemShape ) );
+
+	// Resting on the ground: the same pair is now touching.
+	b3Body_SetTransform( itemBody, (b3Pos){ 0.0f, 1.25f, 0.0f }, b3Quat_identity );
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	count = b3World_GetAwakeContacts( worldId, contacts, 4 );
+	ENSURE( count == 1 );
+	ENSURE( contacts[0].touching == 1 );
+	ENSURE( contacts[0].manifoldCount == 1 );
+
+	ENSURE( b3World_GetAwakeContacts( worldId, contacts, 0 ) == 0 );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 int BodyTest( void )
 {
 	RUN_SUBTEST( FarSingleSphereMass );
@@ -602,5 +647,6 @@ int BodyTest( void )
 	RUN_SUBTEST( ShapeExtents );
 	RUN_SUBTEST( BatchWrites );
 	RUN_SUBTEST( SensorTreeMask );
+	RUN_SUBTEST( ContactCensus );
 	return 0;
 }

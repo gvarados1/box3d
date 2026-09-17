@@ -8,9 +8,12 @@
 // recording op, so a recorded session replays through the ordinary per-body path.
 
 #include "body.h"
+#include "constraint_graph.h"
+#include "contact.h"
 #include "core.h"
 #include "physics_world.h"
 #include "recording.h"
+#include "shape.h"
 #include "solver_set.h"
 
 #include "box3d/box3d.h"
@@ -177,4 +180,52 @@ uint32_t b3World_GetSensorTreeMask( b3WorldId worldId )
 {
 	b3World* world = b3GetWorldFromId( worldId );
 	return world->sensorTreeMask;
+}
+
+// Contact census (box3d.h). Walks the same awake contacts the collide stage gathers each step: touching
+// contacts from the constraint graph colors, then the non-touching ones from the awake set. Not recorded.
+static void b3WriteAwakeContact( b3World* world, int contactId, b3AwakeContact* out )
+{
+	b3Contact* contact = b3Array_Get( world->contacts, contactId );
+	b3Shape* shapeA = b3Array_Get( world->shapes, contact->shapeIdA );
+	b3Shape* shapeB = b3Array_Get( world->shapes, contact->shapeIdB );
+	out->shapeIdA = (b3ShapeId){ shapeA->id + 1, world->worldId, shapeA->generation };
+	out->shapeIdB = (b3ShapeId){ shapeB->id + 1, world->worldId, shapeB->generation };
+	out->manifoldCount = contact->manifoldCount;
+	out->touching = ( contact->flags & b3_contactTouchingFlag ) != 0 ? 1 : 0;
+}
+
+int b3World_GetAwakeContacts( b3WorldId worldId, b3AwakeContact* contacts, int capacity )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return 0;
+	}
+
+	int count = 0;
+	for ( int i = 0; i < B3_GRAPH_COLOR_COUNT; ++i )
+	{
+		b3GraphColor* color = world->constraintGraph.colors + i;
+		for ( int j = 0; j < color->convexContacts.count && count < capacity; ++j )
+		{
+			b3WriteAwakeContact( world, color->convexContacts.data[j], contacts + count );
+			count += 1;
+		}
+
+		for ( int j = 0; j < color->contacts.count && count < capacity; ++j )
+		{
+			b3WriteAwakeContact( world, color->contacts.data[j].contactId, contacts + count );
+			count += 1;
+		}
+	}
+
+	b3SolverSet* awakeSet = b3Array_Get( world->solverSets, b3_awakeSet );
+	for ( int j = 0; j < awakeSet->contactIndices.count && count < capacity; ++j )
+	{
+		b3WriteAwakeContact( world, awakeSet->contactIndices.data[j], contacts + count );
+		count += 1;
+	}
+
+	return count;
 }
