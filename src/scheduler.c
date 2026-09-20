@@ -4,6 +4,7 @@
 #include "platform.h"
 #include "core.h"
 #include "scheduler.h"
+#include "unity_profiler.h"
 
 #include "box3d/base.h"
 #include "box3d/constants.h"
@@ -24,6 +25,7 @@ typedef struct b3SchedulerTask
 {
 	b3TaskCallback* callback;
 	void* taskContext;
+	b3ProfilerMarker* marker;
 	b3AtomicInt status;
 } b3SchedulerTask;
 
@@ -31,6 +33,7 @@ typedef struct b3SchedulerWorkerContext
 {
 	struct b3Scheduler* scheduler;
 	int threadIndex;
+	char profilerName[16];
 } b3SchedulerWorkerContext;
 
 typedef struct b3Scheduler
@@ -69,7 +72,9 @@ static bool b3SchedulerExecuteOne( b3Scheduler* scheduler )
 			continue;
 		}
 
+		b3UnityProfilerBegin( task->marker );
 		task->callback( task->taskContext );
+		b3UnityProfilerEnd( task->marker );
 
 		b3AtomicStoreInt( &task->status, b3_schedulerComplete );
 		return true;
@@ -83,6 +88,8 @@ static void b3SchedulerWorkerMain( void* context )
 {
 	b3SchedulerWorkerContext* workerContext = context;
 	b3Scheduler* scheduler = workerContext->scheduler;
+
+	b3UnityProfilerRegisterThread( workerContext->profilerName );
 
 	while ( true )
 	{
@@ -98,6 +105,8 @@ static void b3SchedulerWorkerMain( void* context )
 		{
 		}
 	}
+
+	b3UnityProfilerUnregisterThread();
 }
 
 b3Scheduler* b3CreateScheduler( int workerCount )
@@ -120,6 +129,7 @@ b3Scheduler* b3CreateScheduler( int workerCount )
 	{
 		scheduler->workerContexts[i].scheduler = scheduler;
 		scheduler->workerContexts[i].threadIndex = i + 1;
+		snprintf( scheduler->workerContexts[i].profilerName, sizeof( scheduler->workerContexts[i].profilerName ), "Worker %d", i + 1 );
 
 		char name[16];
 		snprintf( name, sizeof( name ), "box2d_worker_%02d", i + 1 );
@@ -156,7 +166,6 @@ void b3ResetScheduler( b3Scheduler* scheduler )
 
 void* b3SchedulerEnqueueTask( b3TaskCallback* task, void* taskContext, void* userContext, const char* name )
 {
-	B3_UNUSED( name );
 	b3Scheduler* scheduler = userContext;
 
 	int slot = b3AtomicFetchAddInt( &scheduler->nextSlot, 1 );
@@ -165,6 +174,7 @@ void* b3SchedulerEnqueueTask( b3TaskCallback* task, void* taskContext, void* use
 	b3SchedulerTask* schedulerTask = scheduler->tasks + slot;
 	schedulerTask->callback = task;
 	schedulerTask->taskContext = taskContext;
+	schedulerTask->marker = b3UnityProfilerMarker( name );
 
 	// Memory fence: status must be published after callback and context are written
 	b3AtomicStoreInt( &schedulerTask->status, b3_schedulerPending );

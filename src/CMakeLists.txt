@@ -88,6 +88,7 @@ set(BOX3D_SOURCE_FILES
 	timer.c
 	triangle_manifold.c
 	types.c
+	unity_profiler.h
 	verstable.h
 	weld_joint.c
 	wheel_joint.c
@@ -178,6 +179,13 @@ if (BOX3D_DOUBLE_PRECISION)
 	message(STATUS "Box3D double precision ON")
 	# PUBLIC: consumers must see the same precision mode in the headers or they cannot match the ABI
 	target_compile_definitions(box3d PUBLIC BOX3D_DOUBLE_PRECISION)
+endif()
+
+if (BOX3D_UNITY_PROFILER)
+	message(STATUS "Box3D Unity profiler hooks ON")
+	target_sources(box3d PRIVATE unity_profiler.c)
+	target_compile_definitions(box3d PRIVATE BOX3D_UNITY_PROFILER)
+	target_include_directories(box3d PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../extern/unity)
 endif()
 
 # Enable asserts in release with debug info

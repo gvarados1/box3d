@@ -18,6 +18,7 @@
 #include "platform.h"
 #include "recording.h"
 #include "scheduler.h"
+#include "unity_profiler.h"
 #include "sensor.h"
 #include "shape.h"
 #include "solver.h"
@@ -140,8 +141,11 @@ b3World* b3GetUnlockedWorld( int index )
 
 static void* b3DefaultAddTaskFcn( b3TaskCallback* task, void* taskContext, void* userContext, const char* name )
 {
-	B3_UNUSED( userContext, name );
+	B3_UNUSED( userContext );
+	b3ProfilerMarker* marker = b3UnityProfilerMarker( name );
+	b3UnityProfilerBegin( marker );
 	task( taskContext );
+	b3UnityProfilerEnd( marker );
 	return NULL;
 }
 

@@ -91,6 +91,7 @@ endif()
 option(BOX3D_DISABLE_SIMD "Disable SIMD math (slower)" OFF)
 option(BOX3D_COMPILE_WARNING_AS_ERROR "Compile warnings as errors" OFF)
 option(BOX3D_DOUBLE_PRECISION "Enable double precision for large worlds" OFF)
+option(BOX3D_UNITY_PROFILER "Register worker threads and tasks with the Unity profiler (Unity plugin builds)" OFF)
 
 # These are read by the library build, so they must precede add_subdirectory(src),
 # otherwise the first configure and a re-configure produce different libraries.
