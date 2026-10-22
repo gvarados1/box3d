@@ -47,6 +47,8 @@ B3_API int b3GetMaxWorldCount( void );
 B3_API bool b3World_IsValid( b3WorldId id );
 
 /// Simulate a world for one time step. This performs collision detection, integration, and constraint solution.
+/// A time step of zero runs the broad-phase and collision, but skips the solver. So you can still get contact
+/// and sensor events.
 /// @param worldId The world to simulate
 /// @param timeStep The amount of time to simulate, this should be a fixed number. Usually 1/60.
 /// @param subStepCount The number of sub-steps, increasing the sub-step count can increase accuracy. Usually 4.
@@ -151,6 +153,19 @@ B3_API void b3World_SetRestitutionThreshold( b3WorldId worldId, float value );
 /// Get the restitution speed threshold. Usually in meters per second.
 B3_API float b3World_GetRestitutionThreshold( b3WorldId worldId );
 
+/// Set the number of iterations used by the restitution solver.
+/// @see B3_MAX_RESTITUTION_ITERATIONS
+B3_API void b3World_SetRestitutionIterations( b3WorldId worldId, int iterations );
+
+/// Get the number of iterations used by the restitution solver.
+B3_API int b3World_GetRestitutionIterations( b3WorldId worldId );
+
+/// Enable restitution propagation.
+B3_API void b3World_EnableRestitutionPropagation( b3WorldId worldId, bool flag );
+
+/// Is restitution propagation enabled?
+B3_API bool b3World_IsRestitutionPropagationEnabled( b3WorldId worldId );
+
 /// Adjust the hit event threshold. This controls the collision speed needed to generate a b3ContactHitEvent.
 /// Usually in meters per second.
 /// @see b3WorldDef::hitEventThreshold
@@ -199,12 +214,23 @@ B3_API void b3World_SetMaximumLinearSpeed( b3WorldId worldId, float maximumLinea
 /// Get the maximum linear speed. Usually in m/s.
 B3_API float b3World_GetMaximumLinearSpeed( b3WorldId worldId );
 
+/// Set the tolerance for gyroscopic torque. [0, 1]
+/// @note modifying this only affects new bodies or bodies that get their mass updated.
+B3_API void b3World_SetIsotropicInertiaTolerance( b3WorldId worldId, float tolerance );
+
+/// Get the tolerance for gyroscopic torque. [0, 1]
+B3_API float b3World_GetIsotropicInertiaTolerance( b3WorldId worldId );
+
 /// Enable/disable constraint warm starting. Advanced feature for testing. Disabling
 /// warm starting greatly reduces stability and provides no performance gain.
 B3_API void b3World_EnableWarmStarting( b3WorldId worldId, bool flag );
 
 /// Is constraint warm starting enabled?
 B3_API bool b3World_IsWarmStartingEnabled( b3WorldId worldId );
+
+/// Enable the SSE2 fallback even when AVX2 is present. This is for testing.
+/// Normally you should use the CMake build settings to disable AVX2.
+B3_API void b3World_EnableSSE2Fallback( b3WorldId worldId, bool flag );
 
 /// Get the number of awake bodies
 B3_API int b3World_GetAwakeBodyCount( b3WorldId worldId );
@@ -254,9 +280,6 @@ B3_API void b3World_DumpMemoryStats( b3WorldId worldId );
 
 /// Dump shape bounds to box3d_bounds.txt
 B3_API void b3World_DumpShapeBounds( b3WorldId worldId, b3BodyType type );
-
-/// This is for internal testing
-B3_API void b3World_RebuildStaticTree( b3WorldId worldId );
 
 /// This is for internal testing
 B3_API void b3World_EnableSpeculative( b3WorldId worldId, bool flag );
@@ -999,6 +1022,9 @@ B3_API b3Mesh b3Shape_GetMesh( b3ShapeId shapeId );
 
 /// Get the shape's height field. Asserts the type is correct.
 B3_API const b3HeightFieldData* b3Shape_GetHeightField( b3ShapeId shapeId );
+
+/// Get the shape's compound. Asserts the type is correct.
+B3_API const b3CompoundData* b3Shape_GetCompound( b3ShapeId shapeId );
 
 /// Allows you to change a shape to be a sphere or update the current sphere.
 /// This does not modify the mass properties.
