@@ -123,20 +123,23 @@ static FluidItem CreateFluidItem( b3WorldId worldId, const FluidItemKind* kinds,
 	return item;
 }
 
-// Walls around the interior on the ground box floor. An open end leaves out the +x wall.
-static void CreateBasin( b3WorldId worldId, b3AABB interior, bool openEnd )
+// Walls around the interior on the ground box floor, turned about its center by the rotation
+// (radians about +y, like a fluid volume). An open end leaves out the +x wall.
+static void CreateBasin( b3WorldId worldId, b3AABB interior, float rotation, bool openEnd )
 {
-	b3BodyDef bodyDef = b3DefaultBodyDef();
-	bodyDef.name = "basin";
-	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
-
-	b3ShapeDef shapeDef = b3DefaultShapeDef();
-
 	float thickness = 0.25f;
 	b3Vec3 lower = interior.lowerBound;
 	b3Vec3 upper = interior.upperBound;
 	b3Vec3 extents = b3MulSV( 0.5f, b3Sub( upper, lower ) );
 	b3Vec3 center = b3Add( lower, extents );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.name = "basin";
+	bodyDef.rotation = b3MakeQuatFromAxisAngle( b3Vec3_axisY, rotation );
+	bodyDef.position = b3ToPos( b3Sub( center, b3RotateVector( bodyDef.rotation, center ) ) );
+	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
 
 	b3BoxHull box = b3MakeOffsetBoxHull( thickness, extents.y, extents.z + 2.0f * thickness,
 										 { lower.x - thickness, center.y, center.z } );
@@ -158,18 +161,20 @@ static void CreateBasin( b3WorldId worldId, b3AABB interior, bool openEnd )
 	b3CreateHullShape( bodyId, &shapeDef, &box.base );
 }
 
-static b3FluidVolumeId CreatePoolVolume( b3WorldId worldId, b3AABB bounds, float surfaceHeight,
-										 b3Vec3 flowVelocity )
+static b3FluidVolumeId CreatePoolVolume( b3WorldId worldId, b3AABB bounds, float rotation,
+										 float surfaceHeight, b3Vec3 flowVelocity )
 {
 	b3FluidVolumeDef volumeDef = b3DefaultFluidVolumeDef();
 	volumeDef.bounds = bounds;
+	volumeDef.rotation = rotation;
 	volumeDef.surface = { b3Vec3_axisY, surfaceHeight };
 	volumeDef.flowVelocity = flowVelocity;
 	return b3CreateFluidVolume( worldId, &volumeDef );
 }
 
-// Translucent water from the bounds bottom up to the surface, with the surface outline
-static void DrawWater( b3AABB bounds, float surfaceHeight )
+// Translucent water from the bounds bottom up to the surface, with the surface outline. The
+// rotation turns the bounds about their center around +y, as the volume does.
+static void DrawWater( b3AABB bounds, float rotation, float surfaceHeight )
 {
 	b3Vec3 lower = bounds.lowerBound;
 	b3Vec3 upper = bounds.upperBound;
@@ -179,18 +184,22 @@ static void DrawWater( b3AABB bounds, float surfaceHeight )
 		return;
 	}
 
+	b3Quat q = b3MakeQuatFromAxisAngle( b3Vec3_axisY, rotation );
 	b3Vec3 center = { 0.5f * ( lower.x + upper.x ), 0.5f * ( lower.y + top ),
 					  0.5f * ( lower.z + upper.z ) };
-	b3WorldTransform transform = { b3ToPos( center ), b3Quat_identity };
+	b3WorldTransform transform = { b3ToPos( center ), q };
 	b3Vec3 scale = { upper.x - lower.x, top - lower.y, upper.z - lower.z };
 	DrawCubeEx( transform, scale, MakeColorAlpha( b3_colorDodgerBlue, 0.25f ), 0.0f, 0.1f,
 				TRANSPARENT_SHADOW_NONE );
 
 	Vec4 color = MakeColor( b3_colorLightSkyBlue );
-	b3Pos p1 = { lower.x, top, lower.z };
-	b3Pos p2 = { upper.x, top, lower.z };
-	b3Pos p3 = { upper.x, top, upper.z };
-	b3Pos p4 = { lower.x, top, upper.z };
+	b3Pos surfaceCenter = { center.x, top, center.z };
+	float hx = 0.5f * scale.x;
+	float hz = 0.5f * scale.z;
+	b3Pos p1 = surfaceCenter + b3RotateVector( q, { -hx, 0.0f, -hz } );
+	b3Pos p2 = surfaceCenter + b3RotateVector( q, { hx, 0.0f, -hz } );
+	b3Pos p3 = surfaceCenter + b3RotateVector( q, { hx, 0.0f, hz } );
+	b3Pos p4 = surfaceCenter + b3RotateVector( q, { -hx, 0.0f, hz } );
 	DrawLine( p1, p2, color );
 	DrawLine( p2, p3, color );
 	DrawLine( p3, p4, color );
@@ -256,16 +265,18 @@ public:
 		AddGroundBox( 20.0f );
 
 		m_bounds = { { -5.0f, 0.0f, -4.0f }, { 5.0f, 3.0f, 4.0f } };
-		CreateBasin( m_worldId, m_bounds, false );
+		CreateBasin( m_worldId, m_bounds, 0.0f, false );
 
 		b3FluidVolumeDef defaultDef = b3DefaultFluidVolumeDef();
+		m_rotation = 0.0f;
 		m_density = defaultDef.density;
 		m_linearDrag = defaultDef.linearDrag;
 		m_angularDrag = defaultDef.angularDrag;
 		m_quadraticDrag = defaultDef.quadraticDrag;
 		m_surfaceHeight = 2.0f;
 		m_flowVelocity = b3Vec3_zero;
-		m_volumeId = CreatePoolVolume( m_worldId, m_bounds, m_surfaceHeight, m_flowVelocity );
+		m_volumeId = CreatePoolVolume( m_worldId, m_bounds, GetRotationRadians(), m_surfaceHeight,
+									   m_flowVelocity );
 
 		// Totals survive Reset, so begin minus end always counts the bodies in fluid
 		m_beginCount = 0;
@@ -320,6 +331,11 @@ public:
 		m_itemCount += 1;
 	}
 
+	float GetRotationRadians() const
+	{
+		return ( B3_PI / 180.0f ) * m_rotation;
+	}
+
 	void DropItem()
 	{
 		b3Vec3 lower = m_bounds.lowerBound;
@@ -353,6 +369,12 @@ public:
 								 "%.2f m", flags ) )
 		{
 			b3FluidVolume_SetSurface( m_volumeId, { b3Vec3_axisY, m_surfaceHeight } );
+		}
+
+		// Turns the water only, the walls stay put
+		if ( ImGui::SliderFloat( "Rotation", &m_rotation, -90.0f, 90.0f, "%.0f deg", flags ) )
+		{
+			b3FluidVolume_SetRotation( m_volumeId, GetRotationRadians() );
 		}
 
 		bool flowChanged =
@@ -411,7 +433,7 @@ public:
 
 	void Render() override
 	{
-		DrawWater( m_bounds, m_surfaceHeight );
+		DrawWater( m_bounds, GetRotationRadians(), m_surfaceHeight );
 
 		// Buoyancy / weight = density * fraction / (SG * water density), weight is a 0.5 m arrow
 		Vec4 buoyancyColor = MakeColor( b3_colorAqua );
@@ -471,6 +493,7 @@ public:
 
 	b3AABB m_bounds;
 	b3FluidVolumeId m_volumeId;
+	float m_rotation;
 	float m_density;
 	float m_linearDrag;
 	float m_angularDrag;
@@ -523,23 +546,52 @@ public:
 
 		m_stepWhilePaused = false;
 
-		AddGroundBox( 30.0f );
-
-		// Closed upstream at -x and open downstream at +x
+		// Closed upstream at -x and open downstream at +x, before the turn
 		m_bounds = { { -20.0f, 0.0f, -2.0f }, { 20.0f, 3.0f, 2.0f } };
-		CreateBasin( m_worldId, m_bounds, true );
-
+		m_angle = 0.0f;
 		m_surfaceHeight = 2.0f;
 		m_flowSpeed = 1.5f;
-		m_volumeId =
-			CreatePoolVolume( m_worldId, m_bounds, m_surfaceHeight, { m_flowSpeed, 0.0f, 0.0f } );
-
 		m_spawnInterval = 8;
 		m_maxCount = 120;
 		m_maxAge = 40.0f;
+		CreateScene();
+	}
+
+	// The channel turns about the bounds center by the angle, as the volume does
+	void CreateScene()
+	{
+		m_rotation = ( B3_PI / 180.0f ) * m_angle;
+		m_yaw = b3MakeQuatFromAxisAngle( b3Vec3_axisY, m_rotation );
+
+		AddGroundBox( 30.0f );
+		CreateBasin( m_worldId, m_bounds, m_rotation, true );
+		m_volumeId =
+			CreatePoolVolume( m_worldId, m_bounds, m_rotation, m_surfaceHeight, GetFlowVelocity() );
+
 		m_itemCount = 0;
 		m_beginTotal = 0;
 		m_endTotal = 0;
+	}
+
+	b3Vec3 GetFlowVelocity() const
+	{
+		return b3RotateVector( m_yaw, { m_flowSpeed, 0.0f, 0.0f } );
+	}
+
+	// Turns a point of the unturned channel into world space
+	b3Pos ToWorld( b3Vec3 p ) const
+	{
+		b3Vec3 center = b3AABB_Center( m_bounds );
+		b3Vec3 offset = b3RotateVector( m_yaw, { p.x - center.x, 0.0f, p.z - center.z } );
+		return b3ToPos( { center.x + offset.x, p.y, center.z + offset.z } );
+	}
+
+	// The x a world point had in the unturned channel
+	double GetChannelX( b3Pos p ) const
+	{
+		b3Vec3 center = b3AABB_Center( m_bounds );
+		b3Vec3 axis = b3RotateVector( m_yaw, b3Vec3_axisX );
+		return center.x + ( axis.x * ( p.x - center.x ) + axis.z * ( p.z - center.z ) );
 	}
 
 	void SpawnItem()
@@ -547,7 +599,7 @@ public:
 		int kindIndex = RandomInt() % e_kindCount;
 		float x = m_bounds.lowerBound.x + RandomFloatRange( 1.0f, 2.5f );
 		float z = RandomFloatRange( m_bounds.lowerBound.z + 0.5f, m_bounds.upperBound.z - 0.5f );
-		b3Pos position = { x, m_surfaceHeight + 1.0f, z };
+		b3Pos position = ToWorld( { x, m_surfaceHeight + 1.0f, z } );
 		m_items[m_itemCount] =
 			CreateFluidItem( m_worldId, s_channelKinds, kindIndex, position, RandomQuat() );
 		m_itemCount += 1;
@@ -556,9 +608,20 @@ public:
 	bool DrawControls() override
 	{
 		ImGuiSliderFlags flags = ImGuiSliderFlags_AlwaysClamp;
+		ImGui::SliderFloat( "Angle", &m_angle, -90.0f, 90.0f, "%.0f deg", flags );
+		if ( ImGui::IsItemDeactivatedAfterEdit() )
+		{
+			// A fresh world, so the turned scene starts like a restart
+			ResetProfile();
+			b3Capacity capacity = {};
+			CreateWorld( &capacity );
+			g_randomSeed = RAND_SEED;
+			CreateScene();
+		}
+
 		if ( ImGui::SliderFloat( "Flow", &m_flowSpeed, 0.0f, 5.0f, "%.1f m/s", flags ) )
 		{
-			b3FluidVolume_SetFlowVelocity( m_volumeId, { m_flowSpeed, 0.0f, 0.0f } );
+			b3FluidVolume_SetFlowVelocity( m_volumeId, GetFlowVelocity() );
 		}
 
 		ImGui::SliderInt( "Spawn Interval", &m_spawnInterval, 1, 60, "%d steps", flags );
@@ -590,7 +653,7 @@ public:
 			item.age += 1;
 
 			b3Pos center = b3Body_GetWorldPoint( item.bodyId, item.localCenter );
-			if ( center.x > endX || center.y < -5.0f || item.age > maxAgeSteps )
+			if ( GetChannelX( center ) > endX || center.y < -5.0f || item.age > maxAgeSteps )
 			{
 				b3DestroyBody( item.bodyId );
 				continue;
@@ -610,15 +673,19 @@ public:
 
 	void Render() override
 	{
-		DrawWater( m_bounds, m_surfaceHeight );
+		DrawWater( m_bounds, m_rotation, m_surfaceHeight );
 
 		Vec4 flowColor = MakeColor( b3_colorLightSkyBlue );
+		b3Vec3 arrow = b3MulSV( 0.5f, GetFlowVelocity() );
+		float middleZ = b3AABB_Center( m_bounds ).z;
 		for ( float x = m_bounds.lowerBound.x + 2.0f; x < m_bounds.upperBound.x; x += 6.0f )
 		{
-			b3Pos p = { x, m_surfaceHeight + 0.05f, 0.0f };
-			DrawArrow( p, p + b3Vec3{ 0.5f * m_flowSpeed, 0.0f, 0.0f }, flowColor );
+			b3Pos p = ToWorld( { x, m_surfaceHeight + 0.05f, middleZ } );
+			DrawArrow( p, p + arrow, flowColor );
 		}
 
+		// Positions and speeds along the channel
+		b3Vec3 downstream = b3RotateVector( m_yaw, b3Vec3_axisX );
 		int counts[e_kindCount] = {};
 		float sumX[e_kindCount] = {};
 		float sumSpeed[e_kindCount] = {};
@@ -632,8 +699,8 @@ public:
 
 			b3Pos center = b3Body_GetWorldPoint( item->bodyId, item->localCenter );
 			counts[item->kind] += 1;
-			sumX[item->kind] += float( center.x );
-			sumSpeed[item->kind] += b3Body_GetLinearVelocity( item->bodyId ).x;
+			sumX[item->kind] += float( GetChannelX( center ) );
+			sumSpeed[item->kind] += b3Dot( b3Body_GetLinearVelocity( item->bodyId ), downstream );
 		}
 
 		DrawTextLine( "flow %.1f m/s, light and broad items drift, dense ones sink and lag",
@@ -666,6 +733,11 @@ public:
 
 	b3AABB m_bounds;
 	b3FluidVolumeId m_volumeId;
+	float m_angle;
+
+	// The turn the scene was built with; the slider only takes effect on release
+	float m_rotation;
+	b3Quat m_yaw;
 	float m_surfaceHeight;
 	float m_flowSpeed;
 	int m_spawnInterval;
@@ -747,7 +819,7 @@ public:
 		CreateWorld( &capacity );
 
 		AddGroundBox( 30.0f );
-		CreateBasin( m_worldId, m_bounds, false );
+		CreateBasin( m_worldId, m_bounds, 0.0f, false );
 
 		b3Vec3 lower = m_bounds.lowerBound;
 		b3Vec3 upper = m_bounds.upperBound;
@@ -759,7 +831,7 @@ public:
 		{
 			b3AABB tile = GetTileBounds( i % m_tileSide, i / m_tileSide );
 			m_tileIds.push_back(
-				CreatePoolVolume( m_worldId, tile, m_surfaceHeight, b3Vec3_zero ) );
+				CreatePoolVolume( m_worldId, tile, 0.0f, m_surfaceHeight, b3Vec3_zero ) );
 		}
 
 		// Shallow pools in a column on each side of the basin
@@ -773,7 +845,7 @@ public:
 			float halfDepth = 0.4f * pitch;
 			b3AABB decoy = { { x - 1.0f, 0.0f, z - halfDepth }, { x + 1.0f, 1.0f, z + halfDepth } };
 			m_decoyBounds.push_back( decoy );
-			CreatePoolVolume( m_worldId, decoy, s_stressDecoySurface, b3Vec3_zero );
+			CreatePoolVolume( m_worldId, decoy, 0.0f, s_stressDecoySurface, b3Vec3_zero );
 		}
 
 		g_randomSeed = RAND_SEED;
@@ -887,7 +959,7 @@ public:
 
 	void Render() override
 	{
-		DrawWater( m_bounds, m_surfaceHeight );
+		DrawWater( m_bounds, 0.0f, m_surfaceHeight );
 
 		Vec4 seamColor = MakeColorAlpha( b3_colorLightSkyBlue, 0.5f );
 		b3Vec3 lower = m_bounds.lowerBound;
@@ -903,7 +975,7 @@ public:
 
 		for ( const b3AABB& decoy : m_decoyBounds )
 		{
-			DrawWater( decoy, s_stressDecoySurface );
+			DrawWater( decoy, 0.0f, s_stressDecoySurface );
 		}
 
 		float fluidSum = 0.0f;

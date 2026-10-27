@@ -337,9 +337,10 @@ static float GetAxisComponent( b3Vec3 v, int axis )
 	return axis == 0 ? v.x : ( axis == 1 ? v.y : v.z );
 }
 
-// Gravity, the surface normal and the bounds axis lie on the given axis, up being +1 or -1
+// Gravity, the surface normal and the bounds axis lie on the given axis, up being +1 or -1. The
+// volume is turned about that axis.
 static int BoxDraft( float hertz, int subStepCount, int axis, float up, float gravityScale,
-					 float* height )
+					 float rotation, float* height )
 {
 	b3WorldDef worldDef = b3DefaultWorldDef();
 	worldDef.gravity = MakeAxisVector( axis, -10.0f * up );
@@ -359,6 +360,7 @@ static int BoxDraft( float hertz, int subStepCount, int axis, float up, float gr
 
 	b3FluidVolumeDef volumeDef = b3DefaultFluidVolumeDef();
 	volumeDef.bounds = (b3AABB){ lower, upper };
+	volumeDef.rotation = rotation;
 	volumeDef.surface = (b3Plane){ MakeAxisVector( axis, up ), 0.0f };
 	b3CreateFluidVolume( worldId, &volumeDef );
 
@@ -432,8 +434,8 @@ static int FreeBoxDraft( float specificGravity )
 static int BoxEquilibrium( void )
 {
 	float height;
-	ENSURE( BoxDraft( 60.0f, 4, 1, 1.0f, 1.0f, &height ) == 0 );
-	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 1.0f, &height ) == 0 );
+	ENSURE( BoxDraft( 60.0f, 4, 1, 1.0f, 1.0f, 0.0f, &height ) == 0 );
+	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 1.0f, 0.0f, &height ) == 0 );
 	ENSURE( FreeBoxDraft( 0.15f ) == 0 );
 	ENSURE( FreeBoxDraft( 0.85f ) == 0 );
 	return 0;
@@ -443,14 +445,14 @@ static int BoxEquilibrium( void )
 static int AxisFrames( void )
 {
 	float reference;
-	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 1.0f, &reference ) == 0 );
+	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 1.0f, 0.0f, &reference ) == 0 );
 
 	int axes[3] = { 0, 2, 1 };
 	float ups[3] = { 1.0f, 1.0f, -1.0f };
 	for ( int i = 0; i < 3; ++i )
 	{
 		float height;
-		ENSURE( BoxDraft( 50.0f, 2, axes[i], ups[i], 1.0f, &height ) == 0 );
+		ENSURE( BoxDraft( 50.0f, 2, axes[i], ups[i], 1.0f, 0.0f, &height ) == 0 );
 		ENSURE_NEAR( height - reference, 1e-5f );
 	}
 
@@ -489,8 +491,8 @@ static int GravityScale( void )
 {
 	float reference;
 	float height;
-	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 1.0f, &reference ) == 0 );
-	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 2.0f, &height ) == 0 );
+	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 1.0f, 0.0f, &reference ) == 0 );
+	ENSURE( BoxDraft( 50.0f, 2, 1, 1.0f, 2.0f, 0.0f, &height ) == 0 );
 	ENSURE_NEAR( height - reference, 5e-4f );
 
 	b3WorldDef worldDef = b3DefaultWorldDef();
@@ -3051,12 +3053,14 @@ typedef struct LookupVolume
 {
 	b3FluidVolumeId id;
 	b3AABB bounds;
+	float rotation;
 	b3Plane surface;
 
-	// Bounds by axis and the vertical axis, refreshed from the fields above
+	// Bounds by axis, the vertical axis and the turn, refreshed from the fields above
 	float lower[3];
 	float upper[3];
 	int axis;
+	b3CosSin cosSin;
 } LookupVolume;
 
 // Fluid volumes mirrored by slot, plus sphere bodies that touch nothing
@@ -3077,10 +3081,15 @@ typedef struct LookupScene
 	int edgeIndices[4];
 	int edgeCount;
 
+	// Volumes are created and changed with turns only in scenes that ask for them
+	bool rotate;
+
 	// Coverage
 	int tieCount;
 	int wetBodyCount;
 	int bandBodyCount;
+	int turnedPointCount;
+	int turnedBodyCount;
 } LookupScene;
 
 static LookupScene s_lookupScene;
@@ -3168,6 +3177,48 @@ static void RefreshLookupVolume( LookupVolume* volume )
 	}
 
 	volume->axis = GetReferenceAxis( volume->surface.normal );
+	volume->cosSin =
+		volume->rotation == 0.0f ? (b3CosSin){ 1.0f, 0.0f } : b3ComputeCosSin( volume->rotation );
+}
+
+// Inside the footprint, see docs/fluid.md "Rotation": axes a = (k + 1) % 3 and b = (k + 2) % 3,
+// inclusive bounds when unturned, else the point turned back about the bounds center, all in double
+static bool IsInReferenceFootprint( const LookupVolume* volume, const double* p )
+{
+	const float* lower = volume->lower;
+	const float* upper = volume->upper;
+	int a = ( volume->axis + 1 ) % 3;
+	int b = ( volume->axis + 2 ) % 3;
+	if ( volume->rotation == 0.0f )
+	{
+		return ( p[a] < lower[a] || upper[a] < p[a] || p[b] < lower[b] || upper[b] < p[b] ) == false;
+	}
+
+	double centerA = 0.5 * ( (double)lower[a] + (double)upper[a] );
+	double centerB = 0.5 * ( (double)lower[b] + (double)upper[b] );
+	double halfA = 0.5 * ( (double)upper[a] - (double)lower[a] );
+	double halfB = 0.5 * ( (double)upper[b] - (double)lower[b] );
+	double c = volume->cosSin.cosine;
+	double s = volume->cosSin.sine;
+	double da = p[a] - centerA;
+	double db = p[b] - centerB;
+	double la = c * da + s * db;
+	double lb = c * db - s * da;
+	return -halfA <= la && la <= halfA && -halfB <= lb && lb <= halfB;
+}
+
+// A point in the turned footprint frame, about the bounds center, as world coordinates on a and b
+static void TurnFootprintPoint( const LookupVolume* volume, double localA, double localB,
+								double* worldA, double* worldB )
+{
+	int a = ( volume->axis + 1 ) % 3;
+	int b = ( volume->axis + 2 ) % 3;
+	double centerA = 0.5 * ( (double)volume->lower[a] + (double)volume->upper[a] );
+	double centerB = 0.5 * ( (double)volume->lower[b] + (double)volume->upper[b] );
+	double c = volume->cosSin.cosine;
+	double s = volume->cosSin.sine;
+	*worldA = centerA + c * localA - s * localB;
+	*worldB = centerB + s * localA + c * localB;
 }
 
 // Classification by a scan in index order: containing bounds, lowest separation, lowest index
@@ -3187,16 +3238,14 @@ static int FindReferenceVolume( LookupScene* scene, b3Pos point, float radius, f
 			continue;
 		}
 
-		// Inclusive bounds on the other two axes
-		const float* lower = volume->lower;
-		const float* upper = volume->upper;
-		int axis = volume->axis;
-		int i = axis == 0 ? 1 : 0;
-		int j = axis == 2 ? 1 : 2;
-		if ( p[i] < lower[i] || upper[i] < p[i] || p[j] < lower[j] || upper[j] < p[j] )
+		if ( IsInReferenceFootprint( volume, p ) == false )
 		{
 			continue;
 		}
+
+		const float* lower = volume->lower;
+		const float* upper = volume->upper;
+		int axis = volume->axis;
 
 		// The radius extends the bounds on the side the normal points to
 		b3Vec3 normal = volume->surface.normal;
@@ -3252,6 +3301,8 @@ static int CheckLookupPoint( LookupScene* scene, b3Pos point )
 	b3FluidVolumeId volumeId = b3World_FindFluidVolume( scene->worldId, point, &depth );
 	if ( B3_ID_EQUALS( volumeId, expectedId ) && depth == expectedDepth )
 	{
+		scene->turnedPointCount +=
+			B3_IS_NON_NULL( expectedId ) && scene->volumes[index].rotation != 0.0f ? 1 : 0;
 		return 0;
 	}
 
@@ -3288,6 +3339,92 @@ static int CheckLookupNeighbours( LookupScene* scene, b3Pos point )
 				return 1;
 			}
 #endif
+		}
+	}
+
+	return 0;
+}
+
+// Each turned footprint's corners, edge midpoints and center with their neighbours, the boundary
+// points nudged in and out, and the corners of and random points in the box around the footprint,
+// which it partly misses, at the bottom, middle and top
+static int CheckTurnedFootprintPoints( LookupScene* scene )
+{
+	for ( int index = 0; index < scene->count; ++index )
+	{
+		const LookupVolume* volume = scene->volumes + index;
+		if ( B3_IS_NULL( volume->id ) || volume->rotation == 0.0f )
+		{
+			continue;
+		}
+
+		int axis = volume->axis;
+		int a = ( axis + 1 ) % 3;
+		int b = ( axis + 2 ) % 3;
+		double halfA = 0.5 * ( (double)volume->upper[a] - (double)volume->lower[a] );
+		double halfB = 0.5 * ( (double)volume->upper[b] - (double)volume->lower[b] );
+		double c = fabs( (double)volume->cosSin.cosine );
+		double s = fabs( (double)volume->cosSin.sine );
+		double boxA = c * fabs( halfA ) + s * fabs( halfB );
+		double boxB = s * fabs( halfA ) + c * fabs( halfB );
+		float bottom = volume->lower[axis];
+		float top = volume->upper[axis];
+		float levels[3] = { bottom, 0.5f * bottom + 0.5f * top, top };
+
+		for ( int level = 0; level < 3; ++level )
+		{
+			b3Pos point = { 0 };
+			SetPosComponent( &point, axis, levels[level] );
+
+			for ( int k = 0; k < 9; ++k )
+			{
+				double localA = ( k % 3 - 1 ) * halfA;
+				double localB = ( k / 3 - 1 ) * halfB;
+				double worldA, worldB;
+				TurnFootprintPoint( volume, localA, localB, &worldA, &worldB );
+				SetPosComponent( &point, a, worldA );
+				SetPosComponent( &point, b, worldB );
+				if ( CheckLookupNeighbours( scene, point ) )
+				{
+					return 1;
+				}
+
+				for ( int side = -1; side <= 1 && k != 4; side += 2 )
+				{
+					double scale = 1.0 + side / 1048576.0;
+					TurnFootprintPoint( volume, scale * localA, scale * localB, &worldA, &worldB );
+					SetPosComponent( &point, a, worldA );
+					SetPosComponent( &point, b, worldB );
+					if ( CheckLookupPoint( scene, point ) )
+					{
+						return 1;
+					}
+				}
+			}
+
+			double centerA, centerB;
+			TurnFootprintPoint( volume, 0.0, 0.0, &centerA, &centerB );
+			for ( int k = 0; k < 4; ++k )
+			{
+				SetPosComponent( &point, a, centerA + ( k % 2 == 0 ? -boxA : boxA ) );
+				SetPosComponent( &point, b, centerB + ( k / 2 == 0 ? -boxB : boxB ) );
+				if ( CheckLookupNeighbours( scene, point ) )
+				{
+					return 1;
+				}
+			}
+
+			for ( int k = 0; k < 8; ++k )
+			{
+				double offsetA = boxA * RandomRange( &scene->seed, -1.0, 1.0 );
+				double offsetB = boxB * RandomRange( &scene->seed, -1.0, 1.0 );
+				SetPosComponent( &point, a, centerA + offsetA );
+				SetPosComponent( &point, b, centerB + offsetB );
+				if ( CheckLookupPoint( scene, point ) )
+				{
+					return 1;
+				}
+			}
 		}
 	}
 
@@ -3366,7 +3503,7 @@ static int CheckLookupPoints( LookupScene* scene )
 		}
 	}
 
-	return 0;
+	return CheckTurnedFootprintPoints( scene );
 }
 
 static void CreateLookupVolume( LookupScene* scene, const b3FluidVolumeDef* def )
@@ -3379,7 +3516,7 @@ static void CreateLookupVolume( LookupScene* scene, const b3FluidVolumeDef* def 
 		return;
 	}
 
-	scene->volumes[index] = (LookupVolume){ volumeId, def->bounds, def->surface };
+	scene->volumes[index] = (LookupVolume){ volumeId, def->bounds, def->rotation, def->surface };
 	RefreshLookupVolume( scene->volumes + index );
 	scene->count = b3MaxInt( scene->count, index + 1 );
 }
@@ -3405,6 +3542,22 @@ static void SetLookupSurface( LookupScene* scene, int index, b3Plane surface )
 	b3FluidVolume_SetSurface( scene->volumes[index].id, surface );
 	scene->volumes[index].surface = surface;
 	RefreshLookupVolume( scene->volumes + index );
+}
+
+static void SetLookupRotation( LookupScene* scene, int index, float rotation )
+{
+	b3FluidVolume_SetRotation( scene->volumes[index].id, rotation );
+	scene->volumes[index].rotation = rotation;
+	RefreshLookupVolume( scene->volumes + index );
+}
+
+// Both zeros, near-zero turns, eighth, quarter and half turns, one far past a full turn, and random
+static float RandomLookupRotation( LookupScene* scene )
+{
+	float rotations[10] = { 0.0f,		   -0.0f,		  1.0e-7f, -1.0e-7f, 0.25f * B3_PI,
+							-0.25f * B3_PI, 0.5f * B3_PI, -0.5f * B3_PI, B3_PI,	  1000.0f };
+	int kind = RandomInt( &scene->seed, 13 );
+	return kind < 10 ? rotations[kind] : (float)RandomRange( &scene->seed, -B3_PI, B3_PI );
 }
 
 static int CountLiveVolumes( const LookupScene* scene )
@@ -3533,6 +3686,7 @@ static b3FluidVolumeDef MakeLookupVolumeDef( LookupScene* scene )
 	{
 		// An identical duplicate
 		def.bounds = scene->volumes[sourceIndex].bounds;
+		def.rotation = scene->volumes[sourceIndex].rotation;
 		def.surface = scene->volumes[sourceIndex].surface;
 		return def;
 	}
@@ -3592,6 +3746,11 @@ static b3FluidVolumeDef MakeLookupVolumeDef( LookupScene* scene )
 
 	def.bounds = bounds;
 	def.surface = RandomLookupSurface( scene, bounds );
+	if ( scene->rotate )
+	{
+		def.rotation = RandomLookupRotation( scene );
+	}
+
 	return def;
 }
 
@@ -3851,6 +4010,20 @@ static b3Pos PlaceLookupBody( LookupScene* scene, int bodyIndex )
 		SetPosComponent( &point, i, value );
 	}
 
+	// A turned footprint carries the choices off the vertical axis with it
+	if ( volume->rotation != 0.0f )
+	{
+		int a = ( axis + 1 ) % 3;
+		int b = ( axis + 2 ) % 3;
+		double centerA = 0.5 * ( (double)volume->lower[a] + (double)volume->upper[a] );
+		double centerB = 0.5 * ( (double)volume->lower[b] + (double)volume->upper[b] );
+		double worldA, worldB;
+		TurnFootprintPoint( volume, GetPosComponent( point, a ) - centerA,
+							GetPosComponent( point, b ) - centerB, &worldA, &worldB );
+		SetPosComponent( &point, a, worldA );
+		SetPosComponent( &point, b, worldB );
+	}
+
 	return point;
 }
 
@@ -3906,6 +4079,7 @@ static int CheckLookupBodies( LookupScene* scene, int subStepCount )
 
 		scene->wetBodyCount += wet ? 1 : 0;
 		scene->bandBodyCount += wet && contains[i] == false ? 1 : 0;
+		scene->turnedBodyCount += wet && scene->volumes[expected[i]].rotation != 0.0f ? 1 : 0;
 	}
 
 	return 0;
@@ -3929,6 +4103,7 @@ typedef struct LookupConfig
 	int unboundedCount;
 	double center[3];
 	float scale;
+	bool rotate;
 } LookupConfig;
 
 static int RunLookupScene( const LookupConfig* config )
@@ -3940,6 +4115,7 @@ static int RunLookupScene( const LookupConfig* config )
 	scene->center[1] = config->center[1];
 	scene->center[2] = config->center[2];
 	scene->scale = config->scale;
+	scene->rotate = config->rotate;
 
 	b3WorldDef worldDef = b3DefaultWorldDef();
 	scene->worldId = b3CreateWorld( &worldDef );
@@ -3958,6 +4134,23 @@ static int RunLookupScene( const LookupConfig* config )
 	ENSURE( CheckLookupScene( scene, "destroy", 4 ) == 0 );
 	PopulateLookupScene( scene, config->volumeCount / 4 + 1, config->unboundedCount );
 	ENSURE( CheckLookupScene( scene, "refill", 2 ) == 0 );
+
+	// Turn, turn again, turn back to either zero, and turn unturned volumes, while the bounds still
+	// keep the grid's cells small
+	if ( scene->rotate )
+	{
+		int turnCount = CountLiveVolumes( scene ) / 2 + 1;
+		for ( int i = 0; i < turnCount; ++i )
+		{
+			int index = RandomLiveVolume( scene, false, false );
+			if ( index >= 0 )
+			{
+				SetLookupRotation( scene, index, RandomLookupRotation( scene ) );
+			}
+		}
+
+		ENSURE( CheckLookupScene( scene, "rotation", 4 ) == 0 );
+	}
 
 	// Move, shrink, grow, flatten, unbound and widen
 	int changeCount = CountLiveVolumes( scene ) / 3 + 1;
@@ -4023,6 +4216,20 @@ static int RunLookupScene( const LookupConfig* config )
 
 	ENSURE( CheckLookupScene( scene, "surface back", 4 ) == 0 );
 
+	// Every volume back to an unturned footprint, by either zero
+	if ( scene->rotate )
+	{
+		for ( int index = 0; index < scene->count; ++index )
+		{
+			if ( B3_IS_NON_NULL( scene->volumes[index].id ) )
+			{
+				SetLookupRotation( scene, index, index % 2 == 0 ? 0.0f : -0.0f );
+			}
+		}
+
+		ENSURE( CheckLookupScene( scene, "rotation zero", 2 ) == 0 );
+	}
+
 	// Destroy everything, then build a new scene in the freed slots
 	for ( int index = 0; index < scene->count; ++index )
 	{
@@ -4044,28 +4251,40 @@ static int RunLookupScene( const LookupConfig* config )
 static int LookupMatchesScan( void )
 {
 	LookupConfig configs[] = {
-		{ 0x1234567u, 8, 0, { 0.0, 0.0, 0.0 }, 10.0f },
-		{ 0x2468ACEu, 40, 2, { 0.0, 0.0, 0.0 }, 20.0f },
-		{ 0x13579BDu, 200, 1, { -30.0, 5.0, 40.0 }, 60.0f },
-		{ 0x0F1E2D3u, 40, 1, { 5000.0, -20.0, 5000.0 }, 30.0f },
+		{ 0x1234567u, 8, 0, { 0.0, 0.0, 0.0 }, 10.0f, false },
+		{ 0x2468ACEu, 40, 2, { 0.0, 0.0, 0.0 }, 20.0f, false },
+		{ 0x13579BDu, 200, 1, { -30.0, 5.0, 40.0 }, 60.0f, false },
+		{ 0x0F1E2D3u, 40, 1, { 5000.0, -20.0, 5000.0 }, 30.0f, false },
+		{ 0x7E57A11u, 12, 0, { 0.0, 0.0, 0.0 }, 10.0f, true },
+		{ 0x3C3C3C3u, 60, 2, { 0.0, 0.0, 0.0 }, 20.0f, true },
+		{ 0x6B8B456u, 200, 1, { 40.0, -5.0, -30.0 }, 60.0f, true },
+		{ 0x1D2C3B4u, 40, 1, { -5000.0, 20.0, 5000.0 }, 30.0f, true },
 #if defined( BOX3D_DOUBLE_PRECISION )
-		{ 0x5A5A5A5u, 40, 2, { 3.0e6 + 0.3, -1.0e3, -7.5e6 }, 200.0f },
+		{ 0x5A5A5A5u, 40, 2, { 3.0e6 + 0.3, -1.0e3, -7.5e6 }, 200.0f, false },
+		{ 0x4B4B4B4u, 40, 2, { -6.0e6 - 0.7, 2.0e3, 4.5e6 }, 200.0f, true },
 #endif
 	};
 
 	int tieCount = 0;
 	int wetBodyCount = 0;
 	int bandBodyCount = 0;
+	int turnedPointCount = 0;
+	int turnedBodyCount = 0;
 	for ( int i = 0; i < ARRAY_COUNT( configs ); ++i )
 	{
 		ENSURE( RunLookupScene( configs + i ) == 0 );
 		tieCount += s_lookupScene.tieCount;
 		wetBodyCount += s_lookupScene.wetBodyCount;
 		bandBodyCount += s_lookupScene.bandBodyCount;
+		turnedPointCount += s_lookupScene.turnedPointCount;
+		turnedBodyCount += s_lookupScene.turnedBodyCount;
 	}
 
 	// Ties decided by index, wet bodies, and wet bodies outside the bounds were all exercised
 	ENSURE( tieCount > 0 && wetBodyCount > 0 && bandBodyCount > 0 );
+
+	// So were points and bodies in turned volumes
+	ENSURE( turnedPointCount > 0 && turnedBodyCount > 0 );
 	return 0;
 }
 
@@ -4517,6 +4736,803 @@ static int ManyVolumesBodies( void )
 	return 0;
 }
 
+// Rotation tests, see docs/fluid.md "Rotation"
+
+// A hand-placed volume in a fresh lookup scene, returning its slot
+static int AddTurnedFootprintVolume( LookupScene* scene, b3AABB bounds, b3Plane surface,
+									 float rotation )
+{
+	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
+	def.bounds = bounds;
+	def.rotation = rotation;
+	def.surface = surface;
+	CreateLookupVolume( scene, &def );
+	return scene->count - 1;
+}
+
+// A point at a distance along and across a channel along x through the origin, turned so that +x
+// turns toward -z, from libm rather than the engine's cosine and sine
+static b3Pos ChannelPoint( float angle, float along, float across, float height )
+{
+	float c = cosf( angle );
+	float s = sinf( angle );
+	return (b3Pos){ c * along + s * across, height, c * across - s * along };
+}
+
+static b3Pos MirrorZ( b3Pos point )
+{
+	point.z = -point.z;
+	return point;
+}
+
+// A 20 m by 2 m channel turned 45 and 30 degrees. Point queries, weightless probes and a floater
+// agree with the turned box, out to its far corners past the unturned bounds, and a ball inside the
+// box around the channel but off it stays dry.
+static int RotatedChannel( void )
+{
+	float angles[2] = { 0.25f * B3_PI, B3_PI / 6.0f };
+	for ( int i = 0; i < 2; ++i )
+	{
+		float angle = angles[i];
+		LookupScene* scene = StartFootprintScene();
+		b3WorldId worldId = scene->worldId;
+		CreateSlab( worldId, (b3Vec3){ 0.0f, -2.5f, 0.0f }, (b3Vec3){ 12.0f, 0.5f, 12.0f } );
+		int index = AddTurnedFootprintVolume(
+			scene, (b3AABB){ { -10.0f, -2.0f, -1.0f }, { 10.0f, 0.0f, 1.0f } },
+			(b3Plane){ b3Vec3_axisY, 0.0f }, angle );
+		b3FluidVolumeId volumeId = scene->volumes[index].id;
+		ENSURE( CheckLookupPoints( scene ) == 0 );
+
+		// Along and across the channel, 1 m deep, then mirrored off it, past its ends and its side
+		float wetPlaces[5][2] = {
+			{ 0.0f, 0.0f }, { 8.0f, 0.5f }, { -9.0f, -0.8f }, { 9.8f, 0.9f }, { -9.8f, 0.9f } };
+		b3Pos dryPoints[5] = {
+			MirrorZ( ChannelPoint( angle, 5.0f, 0.0f, -1.0f ) ),
+			MirrorZ( ChannelPoint( angle, -7.0f, 0.3f, -1.0f ) ),
+			ChannelPoint( angle, 10.5f, 0.0f, -1.0f ),
+			ChannelPoint( angle, -10.5f, 0.5f, -1.0f ),
+			ChannelPoint( angle, 3.0f, 1.3f, -1.0f ),
+		};
+
+		b3BodyId wetProbeIds[5];
+		b3BodyId dryProbeIds[5];
+		for ( int k = 0; k < 5; ++k )
+		{
+			b3Pos wetPoint = ChannelPoint( angle, wetPlaces[k][0], wetPlaces[k][1], -1.0f );
+			float depth = 0.0f;
+			ENSURE( B3_ID_EQUALS( b3World_FindFluidVolume( worldId, wetPoint, &depth ), volumeId ) );
+			ENSURE( depth == 1.0f );
+			ENSURE( B3_IS_NULL( b3World_FindFluidVolume( worldId, dryPoints[k], &depth ) ) );
+			ENSURE( depth == 0.0f );
+
+			wetProbeIds[k] = CreateProbeBall( worldId, wetPoint );
+			dryProbeIds[k] = CreateProbeBall( worldId, dryPoints[k] );
+		}
+
+		// A floater by the far corner, and a ball over the box corner that falls to the bed
+		b3BodyId floaterId =
+			CreateBall( worldId, ChannelPoint( angle, 9.3f, 0.6f, 0.0f ), 0.25f, 500.0f, false );
+		b3BodyId dryId = CreateBall( worldId, MirrorZ( ChannelPoint( angle, 6.0f, 0.0f, 0.0f ) ),
+									 0.25f, 500.0f, false );
+
+		int floaterBeginCount = 0;
+		int floaterEndCount = 0;
+		int dryBeginCount = 0;
+		for ( int step = 0; step < 180; ++step )
+		{
+			b3World_Step( worldId, 1.0f / 60.0f, 4 );
+			b3FluidEvents events = b3World_GetFluidEvents( worldId );
+			for ( int k = 0; k < events.beginCount; ++k )
+			{
+				floaterBeginCount += B3_ID_EQUALS( events.beginEvents[k].bodyId, floaterId ) ? 1 : 0;
+				dryBeginCount += B3_ID_EQUALS( events.beginEvents[k].bodyId, dryId ) ? 1 : 0;
+			}
+
+			for ( int k = 0; k < events.endCount; ++k )
+			{
+				floaterEndCount += B3_ID_EQUALS( events.endEvents[k].bodyId, floaterId ) ? 1 : 0;
+			}
+
+			for ( int k = 0; k < 5 && step == 0; ++k )
+			{
+				ENSURE( IsProbeIn( wetProbeIds[k], volumeId ) );
+				ENSURE( IsProbeIn( dryProbeIds[k], b3_nullFluidVolumeId ) );
+			}
+		}
+
+		// At specific gravity 0.5 the ball's center rides on the surface
+		ENSURE( floaterBeginCount == 1 && floaterEndCount == 0 && dryBeginCount == 0 );
+		ENSURE( IsProbeIn( floaterId, volumeId ) );
+		ENSURE_NEAR( GetHeight( floaterId ), 0.01f );
+		ENSURE( IsProbeIn( dryId, b3_nullFluidVolumeId ) );
+		ENSURE_NEAR( GetHeight( dryId ) + 1.75f, 0.01f );
+
+		// Turned the other way, the channel runs through the mirrored points instead
+		SetLookupRotation( scene, index, -angle );
+		ENSURE( CheckLookupPoints( scene ) == 0 );
+		for ( int k = 0; k < 2; ++k )
+		{
+			b3Pos wetPoint = ChannelPoint( angle, wetPlaces[k + 1][0], wetPlaces[k + 1][1], -1.0f );
+			ENSURE( B3_IS_NULL( b3World_FindFluidVolume( worldId, wetPoint, NULL ) ) );
+			ENSURE( B3_ID_EQUALS( b3World_FindFluidVolume( worldId, dryPoints[k], NULL ), volumeId ) );
+		}
+
+		// Unturned, it reaches past the box around the turned channel along x
+		SetLookupRotation( scene, index, 0.0f );
+		ENSURE( CheckLookupPoints( scene ) == 0 );
+		ENSURE( B3_ID_EQUALS(
+			b3World_FindFluidVolume( worldId, (b3Pos){ 9.5f, -1.0f, 0.5f }, NULL ), volumeId ) );
+		ENSURE( B3_IS_NULL( b3World_FindFluidVolume(
+			worldId, ChannelPoint( angle, wetPlaces[1][0], wetPlaces[1][1], -1.0f ), NULL ) ) );
+
+		b3DestroyWorld( worldId );
+	}
+
+	return 0;
+}
+
+#define ZERO_TURN_BODY_COUNT 12
+
+// A binned pool and an unbinned volume standing along x, with currents. Mode 0 never sets a
+// rotation, modes 1 and 2 create with +0 and -0, and mode 3 sets +0 and -0 during the run.
+static uint32_t RunZeroTurnScene( int mode )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	CreateSlab( worldId, (b3Vec3){ 0.0f, -3.5f, 0.0f }, (b3Vec3){ 10.0f, 0.5f, 10.0f } );
+
+	b3FluidVolumeDef poolDef = b3DefaultFluidVolumeDef();
+	poolDef.bounds = (b3AABB){ { -6.0f, -3.0f, -4.0f }, { 0.0f, 0.0f, 4.0f } };
+	poolDef.flowVelocity = (b3Vec3){ 0.4f, 0.0f, 0.2f };
+
+	// Fluid fills x < 4 over a footprint in y and z
+	b3FluidVolumeDef sideDef = b3DefaultFluidVolumeDef();
+	sideDef.bounds = (b3AABB){ { 0.0f, -3.0f, -4.0f }, { 6.0f, 0.5f, 4.0f } };
+	sideDef.surface = (b3Plane){ b3Vec3_axisX, 4.0f };
+	sideDef.flowVelocity = (b3Vec3){ 0.3f, 0.0f, -0.1f };
+
+	if ( mode == 1 || mode == 2 )
+	{
+		poolDef.rotation = mode == 1 ? 0.0f : -0.0f;
+		sideDef.rotation = poolDef.rotation;
+	}
+
+	b3FluidVolumeId poolId = b3CreateFluidVolume( worldId, &poolDef );
+	b3FluidVolumeId sideId = b3CreateFluidVolume( worldId, &sideDef );
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3BoxHull box = b3MakeBoxHull( 0.2f, 0.15f, 0.25f );
+	b3Sphere sphere = { b3Vec3_zero, 0.2f };
+	b3Capsule capsule = { { -0.25f, 0.0f, 0.0f }, { 0.25f, 0.0f, 0.0f }, 0.12f };
+	float specificGravities[3] = { 0.3f, 0.7f, 1.5f };
+
+	b3BodyId bodyIds[ZERO_TURN_BODY_COUNT];
+	for ( int i = 0; i < ZERO_TURN_BODY_COUNT; ++i )
+	{
+		b3Pos position = { -4.5f + 0.8f * i, 0.6f + 0.2f * ( i % 3 ), -1.5f + 0.7f * ( i % 4 ) };
+		b3Quat rotation =
+			b3MakeQuatFromAxisAngle( b3Normalize( (b3Vec3){ 0.3f, 1.0f, 0.7f } ), 0.4f * i );
+		bodyIds[i] = CreateDynamicBody( worldId, position, rotation, true );
+
+		if ( i % 3 == 0 )
+		{
+			b3CreateHullShape( bodyIds[i], &shapeDef, &box.base );
+		}
+		else if ( i % 3 == 1 )
+		{
+			b3CreateSphereShape( bodyIds[i], &shapeDef, &sphere );
+		}
+		else
+		{
+			b3CreateCapsuleShape( bodyIds[i], &shapeDef, &capsule );
+		}
+
+		SetSpecificGravity( bodyIds[i], specificGravities[( i / 3 ) % 3] );
+	}
+
+	uint32_t hash = B3_HASH_INIT;
+	for ( int step = 0; step < 240; ++step )
+	{
+		if ( mode == 3 && ( step == 60 || step == 120 ) )
+		{
+			b3FluidVolume_SetRotation( poolId, step == 60 ? 0.0f : -0.0f );
+			b3FluidVolume_SetRotation( sideId, step == 60 ? -0.0f : 0.0f );
+		}
+
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+		b3FluidEvents events = b3World_GetFluidEvents( worldId );
+		for ( int i = 0; i < events.beginCount; ++i )
+		{
+			hash = HashBeginEvent( hash, events.beginEvents + i );
+		}
+
+		for ( int i = 0; i < events.endCount; ++i )
+		{
+			hash = HashEndEvent( hash, events.endEvents + i );
+		}
+	}
+
+	for ( int i = 0; i < ZERO_TURN_BODY_COUNT; ++i )
+	{
+		hash = HashBody( hash, bodyIds[i] );
+	}
+
+	b3DestroyWorld( worldId );
+	return hash;
+}
+
+// Either zero, at creation or set later, runs bit-identical to a volume never turned. With all
+// bodies asleep, zero on an unturned volume and a repeated turn are no-ops that wake nothing.
+static int RotationZeroIdentity( void )
+{
+	uint32_t reference = RunZeroTurnScene( 0 );
+	for ( int mode = 1; mode < 4; ++mode )
+	{
+		uint32_t hash = RunZeroTurnScene( mode );
+		if ( hash != reference )
+		{
+			printf( "  mode %d hash=0x%08X reference=0x%08X\n", mode, hash, reference );
+		}
+
+		ENSURE( hash == reference );
+	}
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	CreateSlab( worldId, (b3Vec3){ 0.0f, -2.5f, 0.0f }, (b3Vec3){ 8.0f, 0.5f, 4.0f } );
+	b3FluidVolumeId poolId = CreateBasin(
+		worldId, (b3AABB){ { -6.0f, -2.0f, -3.0f }, { -1.0f, 0.0f, 3.0f } }, 0.0f, b3Vec3_zero );
+
+	b3FluidVolumeDef channelDef = b3DefaultFluidVolumeDef();
+	channelDef.bounds = (b3AABB){ { 1.0f, -2.0f, -1.0f }, { 7.0f, 0.0f, 1.0f } };
+	channelDef.rotation = 0.6f;
+	b3FluidVolumeId channelId = b3CreateFluidVolume( worldId, &channelDef );
+
+	b3Vec3 flat = { 0.15f, 0.05f, 0.15f };
+	b3BodyId poolFloaterId =
+		CreateBox( worldId, (b3Pos){ -3.5f, 0.0f, 0.0f }, b3Quat_identity, flat, 500.0f, true );
+	b3BodyId floaterId =
+		CreateBox( worldId, (b3Pos){ 4.0f, 0.0f, 0.0f }, b3Quat_identity, flat, 500.0f, true );
+	b3BodyId sinkerId = CreateBox( worldId, (b3Pos){ 4.5f, -1.9f, -0.2f }, b3Quat_identity,
+								   (b3Vec3){ 0.1f, 0.1f, 0.1f }, 3000.0f, true );
+
+	Simulate( worldId, 60.0f, 4, 10.0f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( poolFloaterId ), poolId ) );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( floaterId ), channelId ) );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( sinkerId ), channelId ) );
+
+	b3FluidVolume_SetRotation( poolId, 0.0f );
+	b3FluidVolume_SetRotation( poolId, -0.0f );
+	b3FluidVolume_SetRotation( channelId, 0.6f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+	ENSURE( b3FluidVolume_GetDef( poolId ).rotation == 0.0f );
+	ENSURE( b3FluidVolume_GetDef( channelId ).rotation == 0.6f );
+
+	// A real turn wakes the channel's bodies and leaves the pool asleep
+	b3FluidVolume_SetRotation( channelId, 0.7f );
+	ENSURE( b3Body_IsAwake( floaterId ) && b3Body_IsAwake( sinkerId ) );
+	ENSURE( b3Body_IsAwake( poolFloaterId ) == false );
+	b3DestroyWorld( worldId );
+
+	// Negative zero takes the unturned path, so an axis change keeps a sinker below both planes asleep
+	worldId = b3CreateWorld( &worldDef );
+	CreateSlab( worldId, (b3Vec3){ 0.0f, -2.5f, 0.0f }, (b3Vec3){ 5.0f, 0.5f, 5.0f } );
+	b3FluidVolumeDef negativeDef = b3DefaultFluidVolumeDef();
+	negativeDef.bounds = (b3AABB){ { -5.0f, -2.0f, -1.0f }, { 5.0f, 0.0f, 1.0f } };
+	negativeDef.rotation = -0.0f;
+	b3FluidVolumeId negativeId = b3CreateFluidVolume( worldId, &negativeDef );
+	sinkerId = CreateBox( worldId, (b3Pos){ 0.0f, -1.9f, 0.0f }, b3Quat_identity, (b3Vec3){ 0.1f, 0.1f, 0.1f },
+						  3000.0f, true );
+
+	Simulate( worldId, 60.0f, 4, 10.0f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( sinkerId ), negativeId ) );
+
+	b3FluidVolume_SetSurface( negativeId, (b3Plane){ b3Vec3_axisX, 10.0f } );
+	ENSURE( b3Body_IsAwake( sinkerId ) == false );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// A heavy box the volume's mask skips, with a buoyant ball 4 m out along z. Resting on the bed with
+// its center of mass in the footprint it is in fluid, while the ball stays outside the regions a
+// volume change queries, so only the wake of the volume's recorded bodies reaches it.
+static b3BodyId CreateOutrigger( b3WorldId worldId, b3Pos position )
+{
+	b3BodyId bodyId = CreateDynamicBody( worldId, position, b3Quat_identity, true );
+
+	b3ShapeDef boxDef = b3DefaultShapeDef();
+	boxDef.density = 5000.0f;
+	boxDef.filter.categoryBits = 0x2;
+	b3BoxHull box = b3MakeBoxHull( 0.2f, 0.2f, 0.2f );
+	b3CreateHullShape( bodyId, &boxDef, &box.base );
+
+	b3ShapeDef ballDef = b3DefaultShapeDef();
+	ballDef.density = 100.0f;
+	ballDef.filter.categoryBits = 0x1;
+	b3Sphere ball = { { 0.0f, 0.1f, 4.0f }, 0.3f };
+	b3CreateSphereShape( bodyId, &ballDef, &ball );
+
+	LockRotation( bodyId );
+	return bodyId;
+}
+
+// A quarter turn wakes the floater it leaves, which ends its touch, and the sleeper on the bed it
+// reaches, which floats up, but not a dry sleeper far away. A turn, and an axis change of a turned
+// volume, wake the volume's bodies outside every queried region.
+static int WakeOnRotation( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
+	def.bounds = (b3AABB){ { -5.0f, -2.0f, -1.0f }, { 5.0f, 0.0f, 1.0f } };
+	def.rotation = 0.2f;
+	b3FluidVolumeId volumeId = b3CreateFluidVolume( worldId, &def );
+
+	b3BodyId dryId;
+	b3BodyId floaterId = CreateWakeScene( worldId, (b3Pos){ 3.5f, 0.0f, 0.0f }, &dryId );
+	b3BodyId sleeperId = CreateBox( worldId, (b3Pos){ 0.0f, -1.9f, 3.5f }, b3Quat_identity,
+									(b3Vec3){ 0.15f, 0.05f, 0.15f }, 500.0f, true );
+
+	Simulate( worldId, 60.0f, 4, 10.0f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+	ENSURE( EnsureFloating( floaterId, volumeId ) == 0 );
+	ENSURE( B3_IS_NULL( b3Body_GetFluidVolume( sleeperId ) ) );
+
+	b3FluidVolume_SetRotation( volumeId, 0.5f * B3_PI );
+	ENSURE( b3Body_IsAwake( floaterId ) && b3Body_IsAwake( sleeperId ) );
+	ENSURE( b3Body_IsAwake( dryId ) == false );
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	b3FluidEvents events = b3World_GetFluidEvents( worldId );
+	ENSURE( events.beginCount == 1 && events.endCount == 1 );
+	ENSURE( B3_ID_EQUALS( events.endEvents[0].bodyId, floaterId ) );
+	ENSURE( B3_ID_EQUALS( events.endEvents[0].volumeId, volumeId ) );
+	ENSURE( B3_ID_EQUALS( events.beginEvents[0].bodyId, sleeperId ) );
+	ENSURE( B3_ID_EQUALS( events.beginEvents[0].volumeId, volumeId ) );
+	ENSURE( B3_IS_NULL( b3Body_GetFluidVolume( floaterId ) ) );
+
+	Simulate( worldId, 60.0f, 4, 10.0f );
+	ENSURE( EnsureFloating( sleeperId, volumeId ) == 0 );
+	ENSURE( B3_IS_NULL( b3Body_GetFluidVolume( floaterId ) ) );
+	b3DestroyWorld( worldId );
+
+	worldId = b3CreateWorld( &worldDef );
+	CreateSlab( worldId, (b3Vec3){ 0.0f, -2.5f, 0.0f }, (b3Vec3){ 5.0f, 0.5f, 5.0f } );
+	def.maskBits = 0x1;
+	volumeId = b3CreateFluidVolume( worldId, &def );
+	b3BodyId outriggerId = CreateOutrigger( worldId, (b3Pos){ -2.0f, -1.8f, 0.0f } );
+
+	Simulate( worldId, 60.0f, 4, 5.0f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( outriggerId ), volumeId ) );
+
+	// The mirrored turn keeps the box around the footprint
+	b3FluidVolume_SetRotation( volumeId, -0.2f );
+	ENSURE( b3Body_IsAwake( outriggerId ) );
+
+	Simulate( worldId, 60.0f, 4, 5.0f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( outriggerId ), volumeId ) );
+
+	// A sleeper on the bed outside the turned footprint, which the axis change swings over
+	b3BodyId bedId = CreateBox( worldId, (b3Pos){ 3.0f, -1.9f, -0.6f }, b3Quat_identity,
+								(b3Vec3){ 0.1f, 0.1f, 0.1f }, 500.0f, true );
+	Simulate( worldId, 60.0f, 4, 5.0f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+	ENSURE( B3_IS_NULL( b3Body_GetFluidVolume( bedId ) ) );
+
+	// Standing along x, the footprint turns about x instead
+	b3FluidVolume_SetSurface( volumeId, (b3Plane){ b3Vec3_axisX, 10.0f } );
+	ENSURE( b3Body_IsAwake( outriggerId ) && b3Body_IsAwake( bedId ) );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// The default def is unturned, GetDef returns the rotation as set, unwound or not, and a def read
+// back from a turned volume creates the same volume
+static int RotationApi( void )
+{
+	float positiveZero = 0.0f;
+	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
+	ENSURE( memcmp( &def.rotation, &positiveZero, sizeof( float ) ) == 0 );
+
+	LookupScene* scene = StartFootprintScene();
+	def.bounds = (b3AABB){ { -2.0f, -1.0f, -4.0f }, { 2.0f, 1.0f, 4.0f } };
+	def.rotation = 0.7f;
+	CreateLookupVolume( scene, &def );
+	b3FluidVolumeId volumeId = scene->volumes[0].id;
+	ENSURE( b3FluidVolume_GetDef( volumeId ).rotation == 0.7f );
+
+	float turns[4] = { -2.5f, 1000.0f, 0.0f, -7.0f };
+	for ( int i = 0; i < 4; ++i )
+	{
+		b3FluidVolume_SetRotation( volumeId, turns[i] );
+		ENSURE( b3FluidVolume_GetDef( volumeId ).rotation == turns[i] );
+	}
+
+	// The copy ties with the original everywhere, so the lower index wins every point
+	b3FluidVolumeDef copyDef = b3FluidVolume_GetDef( volumeId );
+	SetLookupRotation( scene, 0, -7.0f );
+	CreateLookupVolume( scene, &copyDef );
+	ENSURE( b3FluidVolume_GetDef( scene->volumes[1].id ).rotation == -7.0f );
+	ENSURE( CheckLookupPoints( scene ) == 0 );
+
+	float negativeZero = -0.0f;
+	def.rotation = negativeZero;
+	b3FluidVolumeId zeroId = b3CreateFluidVolume( scene->worldId, &def );
+	float rotation = b3FluidVolume_GetDef( zeroId ).rotation;
+	ENSURE( memcmp( &rotation, &negativeZero, sizeof( float ) ) == 0 );
+
+	b3DestroyWorld( scene->worldId );
+	return 0;
+}
+
+// Volumes standing along x and z turn about that axis, the b side turning toward -a: for x the
+// long z side turns toward -y, for z the long y side toward -x. Neither is binned.
+static int RotatedOffAxes( void )
+{
+	int axes[2] = { 0, 2 };
+	for ( int i = 0; i < 2; ++i )
+	{
+		int axis = axes[i];
+		int a = ( axis + 1 ) % 3;
+		int b = ( axis + 2 ) % 3;
+		b3AABB bounds;
+		bounds.lowerBound = b3Add( MakeAxisVector( axis, -2.0f ),
+								   b3Add( MakeAxisVector( a, -1.0f ), MakeAxisVector( b, -5.0f ) ) );
+		bounds.upperBound = b3Add( MakeAxisVector( a, 1.0f ), MakeAxisVector( b, 5.0f ) );
+
+		LookupScene* scene = StartFootprintScene();
+		int index = AddTurnedFootprintVolume(
+			scene, bounds, (b3Plane){ MakeAxisVector( axis, 1.0f ), 0.0f }, 0.25f * B3_PI );
+		b3FluidVolumeId volumeId = scene->volumes[index].id;
+
+		// 3 m along the turned long side and 1 m deep, then mirrored across a
+		b3Pos inside = { 0 };
+		SetPosComponent( &inside, axis, -1.0 );
+		SetPosComponent( &inside, a, -2.1 );
+		SetPosComponent( &inside, b, 2.1 );
+		b3Pos outside = inside;
+		SetPosComponent( &outside, a, 2.1 );
+
+		float depth = 0.0f;
+		ENSURE( B3_ID_EQUALS( b3World_FindFluidVolume( scene->worldId, inside, &depth ), volumeId ) );
+		ENSURE( depth == 1.0f );
+		ENSURE( B3_IS_NULL( b3World_FindFluidVolume( scene->worldId, outside, &depth ) ) );
+
+		b3BodyId insideId = CreateProbeBall( scene->worldId, inside );
+		b3BodyId outsideId = CreateProbeBall( scene->worldId, outside );
+		b3World_Step( scene->worldId, 1.0f / 60.0f, 4 );
+		ENSURE( IsProbeIn( insideId, volumeId ) );
+		ENSURE( IsProbeIn( outsideId, b3_nullFluidVolumeId ) );
+		ENSURE( CheckLookupPoints( scene ) == 0 );
+
+		// Beside binned pools, through other turns and back to zero
+		AddValidFootprints( scene );
+		ENSURE( CheckLookupPoints( scene ) == 0 );
+		float turns[4] = { -0.25f * B3_PI, 3.0f, 1000.0f, 0.0f };
+		for ( int k = 0; k < 4; ++k )
+		{
+			SetLookupRotation( scene, index, turns[k] );
+			ENSURE( CheckLookupPoints( scene ) == 0 );
+		}
+
+		b3DestroyWorld( scene->worldId );
+	}
+
+	return 0;
+}
+
+// A box at the center of a turned volume rides exactly as in the unturned one, on every axis
+static int RotatedDraft( void )
+{
+	int axes[4] = { 1, 0, 2, 1 };
+	float ups[4] = { 1.0f, 1.0f, 1.0f, -1.0f };
+	float turns[3] = { 0.25f * B3_PI, -2.0f, 1000.0f };
+	for ( int i = 0; i < 4; ++i )
+	{
+		float reference;
+		ENSURE( BoxDraft( 50.0f, 2, axes[i], ups[i], 1.0f, 0.0f, &reference ) == 0 );
+		for ( int k = 0; k < 3; ++k )
+		{
+			float height;
+			ENSURE( BoxDraft( 50.0f, 2, axes[i], ups[i], 1.0f, turns[k], &height ) == 0 );
+			ENSURE( height == reference );
+		}
+	}
+
+	return 0;
+}
+
+static int TurnedInvertedFootprints( void )
+{
+	// Inverted on x, on z, on both, and on both with x barely inverted, in y [0, 5]
+	b3AABB invertedBounds[4] = {
+		{ { 10.0f, 0.0f, 0.0f }, { 5.0f, 5.0f, 10.0f } },
+		{ { 5.0f, 0.0f, 10.0f }, { 10.0f, 5.0f, 0.0f } },
+		{ { 10.0f, 0.0f, 10.0f }, { 5.0f, 5.0f, 0.0f } },
+		{ { 10.0f, 0.0f, 10.0f }, { 9.995f, 5.0f, 0.0f } },
+	};
+
+	float turns[3] = { 0.25f * B3_PI, -1.0f, 0.5f * B3_PI };
+	b3Plane surface = { b3Vec3_axisY, 4.0f };
+	for ( int kind = 0; kind < 4; ++kind )
+	{
+		b3AABB inverted = invertedBounds[kind];
+		b3AABB ordered = { b3Min( inverted.lowerBound, inverted.upperBound ),
+						   b3Max( inverted.lowerBound, inverted.upperBound ) };
+		b3Vec3 center = b3MulSV( 0.5f, b3Add( ordered.lowerBound, ordered.upperBound ) );
+		b3Vec3 span = b3Sub( ordered.upperBound, ordered.lowerBound );
+		float reach = 0.5f * sqrtf( span.x * span.x + span.z * span.z ) + 1.0f;
+		b3Pos probe = { center.x, 2.0f, center.z };
+		float turn = turns[kind % 3];
+
+		// Alone in its world, then created after valid volumes
+		for ( int mixed = 0; mixed < 2; ++mixed )
+		{
+			LookupScene* scene = StartFootprintScene();
+			b3BodyId ballId = CreateProbeBall( scene->worldId, probe );
+			if ( mixed == 1 )
+			{
+				AddValidFootprints( scene );
+			}
+
+			int index = AddTurnedFootprintVolume( scene, inverted, surface, turn );
+			if ( mixed == 0 )
+			{
+				// Over the box around any turn of the footprint and 1 m past it, below, in and above
+				for ( int i = 0; i < 15 * 13 * 4; ++i )
+				{
+					float x = center.x - reach + 2.0f * reach * ( i % 15 ) / 14.0f;
+					float z = center.z - reach + 2.0f * reach * ( ( i / 15 ) % 13 ) / 12.0f;
+					b3Pos point = { x, -0.5f + 1.75f * ( i / 195 ), z };
+					ENSURE( B3_IS_NULL( b3World_FindFluidVolume( scene->worldId, point, NULL ) ) );
+				}
+			}
+
+			ENSURE( CheckLookupPoints( scene ) == 0 );
+			Simulate( scene->worldId, 60.0f, 4, 0.1f );
+			ENSURE( IsProbeIn( ballId, b3_nullFluidVolumeId ) );
+
+			// Other turns, then unturned
+			for ( int k = 1; k <= 3; ++k )
+			{
+				SetLookupRotation( scene, index, k < 3 ? turns[( kind + k ) % 3] : 0.0f );
+				ENSURE( CheckLookupPoints( scene ) == 0 );
+				b3World_Step( scene->worldId, 1.0f / 60.0f, 4 );
+				ENSURE( IsProbeIn( ballId, b3_nullFluidVolumeId ) );
+			}
+
+			b3DestroyWorld( scene->worldId );
+		}
+
+		// The turned pool under the ball goes inverted and back
+		LookupScene* scene = StartFootprintScene();
+		b3BodyId ballId = CreateProbeBall( scene->worldId, probe );
+		int index = AddTurnedFootprintVolume( scene, ordered, surface, turn );
+		b3FluidVolumeId volumeId = scene->volumes[index].id;
+
+		b3World_Step( scene->worldId, 1.0f / 60.0f, 4 );
+		ENSURE( IsProbeIn( ballId, volumeId ) );
+
+		SetLookupBounds( scene, index, inverted );
+		ENSURE( CheckLookupPoints( scene ) == 0 );
+		b3World_Step( scene->worldId, 1.0f / 60.0f, 4 );
+		ENSURE( IsProbeIn( ballId, b3_nullFluidVolumeId ) );
+
+		SetLookupBounds( scene, index, ordered );
+		ENSURE( CheckLookupPoints( scene ) == 0 );
+		b3World_Step( scene->worldId, 1.0f / 60.0f, 4 );
+		ENSURE( IsProbeIn( ballId, volumeId ) );
+		b3DestroyWorld( scene->worldId );
+	}
+
+	return 0;
+}
+
+// Turned bounds near the float limit saturate their aabb, so create still wakes a sleeper under them
+static int TurnedHugeBounds( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	CreateSlab( worldId, (b3Vec3){ 0.0f, -0.5f, 0.0f }, (b3Vec3){ 5.0f, 0.5f, 5.0f } );
+	b3BodyId bodyId = CreateBox( worldId, (b3Pos){ 0.0f, 0.1f, 0.0f }, b3Quat_identity,
+								 (b3Vec3){ 0.1f, 0.1f, 0.1f }, 500.0f, true );
+
+	Simulate( worldId, 60.0f, 4, 5.0f );
+	ENSURE( b3World_GetAwakeBodyCount( worldId ) == 0 );
+
+	b3FluidVolumeDef volumeDef = b3DefaultFluidVolumeDef();
+	volumeDef.bounds = (b3AABB){ { -3.0e38f, -5.0f, -3.0e38f }, { 3.0e38f, 5.0f, 3.0e38f } };
+	volumeDef.rotation = 0.25f * B3_PI;
+	volumeDef.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.0f };
+	b3FluidVolumeId volumeId = b3CreateFluidVolume( worldId, &volumeDef );
+	ENSURE( b3Body_IsAwake( bodyId ) );
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( bodyId ), volumeId ) );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// A turned footprint in the float subnormal range, where rounding its aabb outruns the relative pad
+static int TurnedSubnormalFootprint( void )
+{
+	LookupScene* scene = StartFootprintScene();
+	float half = 1000.0f * FLT_TRUE_MIN;
+	int index = AddFootprintVolume( scene, (b3AABB){ { -half, -1.0f, -half }, { half, 1.0f, half } }, 1.0f );
+	SetLookupRotation( scene, index, 0.25f * B3_PI );
+	ENSURE( CheckLookupPoints( scene ) == 0 );
+	b3DestroyWorld( scene->worldId );
+	return 0;
+}
+
+// Turned inverted footprints neither crash nor match, as in DegenerateFootprints
+static int TurnedDegenerateFootprints( void )
+{
+	b3SetAssertFcn( BoundsAssert );
+	int result = TurnedInvertedFootprints() || TurnedHugeBounds() || TurnedSubnormalFootprint();
+	b3SetAssertFcn( FlushingAssert );
+	return result;
+}
+
+#define TURNED_BODY_COUNT 120
+
+// Turned binned and unbinned volumes with currents, turned, re-bounded, re-axed, created and
+// destroyed during the run; hashes the bodies and the ordered event stream
+static SceneResult RunTurnedScene( int workerCount )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = workerCount;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	CreateSlab( worldId, (b3Vec3){ 0.0f, -3.5f, 0.0f }, (b3Vec3){ 14.0f, 0.5f, 14.0f } );
+
+	// A channel turned 35 degrees with a current along it, a pool turned past a half turn, a volume
+	// standing along x, and a far decoy turned past a full turn
+	b3FluidVolumeDef channelDef = b3DefaultFluidVolumeDef();
+	channelDef.bounds = (b3AABB){ { -9.0f, -3.0f, -1.5f }, { 9.0f, 0.0f, 1.5f } };
+	channelDef.rotation = 0.61f;
+	channelDef.flowVelocity = (b3Vec3){ 0.66f, 0.0f, -0.46f };
+	b3FluidVolumeId channelId = b3CreateFluidVolume( worldId, &channelDef );
+
+	b3FluidVolumeDef poolDef = b3DefaultFluidVolumeDef();
+	poolDef.bounds = (b3AABB){ { -3.0f, -3.0f, 2.0f }, { 3.0f, 0.4f, 8.0f } };
+	poolDef.rotation = -2.3f;
+	poolDef.surface = (b3Plane){ b3Vec3_axisY, 0.4f };
+	poolDef.flowVelocity = (b3Vec3){ 0.2f, 0.0f, -0.3f };
+	b3FluidVolumeId poolId = b3CreateFluidVolume( worldId, &poolDef );
+
+	b3FluidVolumeDef sideDef = b3DefaultFluidVolumeDef();
+	sideDef.bounds = (b3AABB){ { -8.0f, -3.0f, -9.0f }, { 0.0f, 1.0f, -4.0f } };
+	sideDef.surface = (b3Plane){ b3Vec3_axisX, -2.0f };
+	sideDef.rotation = 0.4f;
+	b3CreateFluidVolume( worldId, &sideDef );
+
+	b3FluidVolumeDef decoyDef = b3DefaultFluidVolumeDef();
+	decoyDef.bounds = (b3AABB){ { 40.0f, -3.0f, 40.0f }, { 46.0f, 0.0f, 44.0f } };
+	decoyDef.rotation = 1000.0f;
+	b3CreateFluidVolume( worldId, &decoyDef );
+
+	b3FluidVolumeDef extraDef = b3DefaultFluidVolumeDef();
+	extraDef.bounds = (b3AABB){ { -4.0f, -3.0f, -3.0f }, { 4.0f, 0.2f, 3.0f } };
+	extraDef.rotation = 2.0f;
+	extraDef.surface = (b3Plane){ b3Vec3_axisY, 0.2f };
+
+	b3BoxHull box = b3MakeBoxHull( 0.15f, 0.1f, 0.2f );
+	b3Sphere sphere = { b3Vec3_zero, 0.15f };
+	b3Capsule capsule = { { -0.2f, 0.0f, 0.0f }, { 0.2f, 0.0f, 0.0f }, 0.1f };
+	float densities[3] = { 300.0f, 700.0f, 1500.0f };
+
+	b3BodyId bodyIds[TURNED_BODY_COUNT];
+	for ( int i = 0; i < TURNED_BODY_COUNT; ++i )
+	{
+		b3Pos position = { -9.0f + 1.6f * ( i % 12 ), 0.6f + 0.4f * ( i % 3 ),
+						   -9.0f + 1.8f * ( i / 12 ) };
+		b3Quat rotation =
+			b3MakeQuatFromAxisAngle( b3Normalize( (b3Vec3){ 0.3f, 1.0f, 0.7f } ), 0.37f * i );
+		bodyIds[i] = CreateDynamicBody( worldId, position, rotation, true );
+
+		b3ShapeDef shapeDef = b3DefaultShapeDef();
+		shapeDef.density = densities[( i / 3 ) % 3];
+		if ( i % 3 == 0 )
+		{
+			b3CreateHullShape( bodyIds[i], &shapeDef, &box.base );
+		}
+		else if ( i % 3 == 1 )
+		{
+			b3CreateSphereShape( bodyIds[i], &shapeDef, &sphere );
+		}
+		else
+		{
+			b3CreateCapsuleShape( bodyIds[i], &shapeDef, &capsule );
+		}
+	}
+
+	b3FluidVolumeId extraId = b3_nullFluidVolumeId;
+	SceneResult result = { B3_HASH_INIT, 0, 0 };
+	for ( int step = 0; step < 260; ++step )
+	{
+		if ( step == 60 )
+		{
+			b3FluidVolume_SetRotation( channelId, -0.4f );
+		}
+		else if ( step == 90 )
+		{
+			b3FluidVolume_SetSurface( poolId, (b3Plane){ { -1.0f, 0.0f, 0.0f }, 2.0f } );
+		}
+		else if ( step == 120 )
+		{
+			b3FluidVolume_SetBounds( channelId,
+									 (b3AABB){ { -10.0f, -3.0f, -2.5f }, { 10.0f, 0.0f, 2.5f } } );
+			b3FluidVolume_SetSurface( poolId, poolDef.surface );
+		}
+		else if ( step == 150 )
+		{
+			b3FluidVolume_SetRotation( poolId, 0.0f );
+		}
+		else if ( step == 170 )
+		{
+			extraId = b3CreateFluidVolume( worldId, &extraDef );
+		}
+		else if ( step == 210 )
+		{
+			b3DestroyFluidVolume( extraId );
+		}
+
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+		b3FluidEvents events = b3World_GetFluidEvents( worldId );
+		for ( int i = 0; i < events.beginCount; ++i )
+		{
+			result.hash = HashBeginEvent( result.hash, events.beginEvents + i );
+		}
+
+		for ( int i = 0; i < events.endCount; ++i )
+		{
+			result.hash = HashEndEvent( result.hash, events.endEvents + i );
+		}
+
+		result.beginCount += events.beginCount;
+		result.endCount += events.endCount;
+	}
+
+	for ( int i = 0; i < TURNED_BODY_COUNT; ++i )
+	{
+		result.hash = HashBody( result.hash, bodyIds[i] );
+	}
+
+	b3DestroyWorld( worldId );
+	return result;
+}
+
+static int TurnedWorkerDeterminism( void )
+{
+	SceneResult reference = RunTurnedScene( 1 );
+	ENSURE( reference.beginCount > TURNED_BODY_COUNT / 4 && reference.endCount > 0 );
+
+	for ( int workerCount = 2; workerCount <= 5; ++workerCount )
+	{
+		SceneResult result = RunTurnedScene( workerCount );
+		if ( result.hash != reference.hash )
+		{
+			printf( "  workers=%d hash=0x%08X reference=0x%08X\n", workerCount, result.hash,
+					reference.hash );
+		}
+
+		ENSURE( result.hash == reference.hash );
+		ENSURE( result.beginCount == reference.beginCount &&
+				result.endCount == reference.endCount );
+	}
+
+	return 0;
+}
+
 int FluidTest( void )
 {
 	RUN_SUBTEST( BoxEquilibrium );
@@ -4568,5 +5584,13 @@ int FluidTest( void )
 	RUN_SUBTEST( LookupMatchesScan );
 	RUN_SUBTEST( DegenerateFootprints );
 	RUN_SUBTEST( ManyVolumesBodies );
+	RUN_SUBTEST( RotatedChannel );
+	RUN_SUBTEST( RotationZeroIdentity );
+	RUN_SUBTEST( WakeOnRotation );
+	RUN_SUBTEST( RotationApi );
+	RUN_SUBTEST( RotatedOffAxes );
+	RUN_SUBTEST( RotatedDraft );
+	RUN_SUBTEST( TurnedDegenerateFootprints );
+	RUN_SUBTEST( TurnedWorkerDeterminism );
 	return 0;
 }

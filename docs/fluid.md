@@ -23,7 +23,8 @@ typedef struct b3FluidVolumeId { int32_t index1; uint16_t world0; uint16_t gener
 
 typedef struct b3FluidVolumeDef
 {
-	b3AABB bounds;          // region the fluid can occupy (world space)
+	b3AABB bounds;          // region the fluid can occupy (world space), before the rotation
+	float rotation;         // turn of the bounds about their center around the vertical axis k (radians), default 0
 	b3Plane surface;        // fluid fills bounds below this plane; normal points out of the fluid (unit length)
 	float density;          // default 1000 / lengthUnits^3 (water)
 	float linearDrag;       // linear damping rate (1/s) at full submersion, default 1.5
@@ -65,7 +66,8 @@ layout. All mutators require an unlocked world, like every other mutator.
 **Classification.** Each volume has a vertical axis `k`: the bounds axis most aligned with the
 surface normal. A dynamic body is a candidate for a volume when its center of mass (at the
 predicted pose, below):
-- is inside the bounds on the two axes other than `k`;
+- is inside the bounds' footprint, the bounds on the two axes other than `k` turned by `rotation`
+  (see Rotation);
 - is at or above the bounds' bottom on `k`;
 - is at or below the bounds' top plus `r = |maxExtent|` on `k`.
 
@@ -77,6 +79,24 @@ Among candidates:
 Within the chosen volume, the geometry is clipped by the surface plane only. A body whose center
 of mass is outside every footprint gets no buoyancy. `b3World_FindFluidVolume` applies the same
 rule with `r = 0`, so the player and items agree.
+
+**Rotation.** A volume may turn about its vertical axis `k`, so a channel can follow a diagonal
+stream. Turning about another axis is not supported: the surface stays a plane of its own, and a
+tilted box would leave the lookup grid.
+- The footprint axes are `a = (k + 1) % 3` and `b = (k + 2) % 3`. The turn is right-handed about
+  +k: for `k = y`, `a = z` and `b = x`, and +x turns toward -z. That is Unity's yaw.
+- `rotation == 0` (either sign of zero) uses the axis-aligned test above, unchanged, so unrotated
+  volumes are bit-identical to before rotation existed.
+- Otherwise, with `(c, s) = b3ComputeCosSin(rotation)` and everything in double: the bounds' center
+  `m = 0.5 * (lower + upper)` and half extents `h = 0.5 * (upper - lower)` on `a` and `b`,
+  `d = p - m`, `la = c * d_a + s * d_b` and `lb = c * d_b - s * d_a`. The point is inside the
+  footprint when `-h_a <= la <= h_a` and `-h_b <= lb <= h_b`. Inverted bounds never match.
+- `b3ComputeCosSin` is a deterministic approximation, within about 0.1 degrees of the requested
+  angle: a few centimetres at the end of a 25 m channel.
+- The rotation never changes the range on `k`, and the geometry is still clipped by the surface
+  plane only.
+- `b3FluidVolume_GetDef` returns `rotation` as set, except that a setter call that only flips the
+  sign of zero is a no-op. The cosine and sine are cached on the volume.
 
 **Eligibility.** A body takes part only if all of these hold:
 - it is dynamic;
@@ -196,27 +216,36 @@ when it is reused, so ids never repeat.
 ## Volume lookup
 
 Caves hold many volumes, so classification does not test every volume.
-- Volumes whose axis `k` is y and whose x and z footprint is ordered, inside `B3_HUGE` and narrower
-  than `B3_HUGE / 2` are binned. The rest (other axes, unbounded or inverted bounds) are tested for
-  every body, where the exact test rejects an inverted footprint as before.
-- The binned footprints share one x-z grid over their union, with square cells, about 1024 cells,
-  and at most 256 along a side. Each cell lists the binned volumes whose footprint overlaps it, in
+- Each volume keeps an `aabb` around its footprint. Unrotated, it is the bounds. Rotated, it is the
+  box around the turned footprint, `m ± (|c| h_a + |s| h_b, |s| h_a + |c| h_b)` in double, padded
+  by `2^-16 * (|m| + extent) + FLT_TRUE_MIN` per axis, then rounded to float, saturating at
+  `FLT_MAX`. The relative term covers rounding to normal floats and the absolute one rounding to
+  subnormals, so the aabb holds every point the rotated test accepts. The range on `k` is the
+  bounds' own. The grid and the wake queries use the aabb.
+- Volumes whose axis `k` is y and whose aabb x and z extents are ordered, inside `B3_HUGE` and
+  narrower than `B3_HUGE / 2` are binned. The rest (other axes, unbounded or inverted aabbs) are
+  tested for every body, where the exact test rejects an inverted footprint as before. A turned
+  volume inverted on one footprint axis can still have an ordered aabb and be binned; the exact
+  test rejects it all the same.
+- The binned aabbs share one x-z grid over their union, with square cells, about 1024 cells, and
+  at most 256 along a side. Each cell lists the binned volumes whose aabb overlaps it, in
   ascending index order (compressed rows).
 - A point's cell is `min((int)((p - lower) * inverseCellSize), count - 1)`, computed in double.
-  That is monotonic in `p`, so a volume inserted from its footprint's end cells is listed in the
-  cell of every point the exact footprint test accepts. The grid never drops a candidate.
+  That is monotonic in `p`, so a volume inserted from its aabb's end cells is listed in the cell of
+  every point the exact footprint test accepts. The grid never drops a candidate.
 - The candidates still go through the exact test, and the tie-break is independent of visiting
   order (containing bounds, then the highest surface, then the lowest index). Results are therefore
   bit-identical to testing every volume.
-- The lookup is derived state: it is rebuilt on create, destroy, SetBounds, a SetSurface that
-  changes the axis, and snapshot restore, all on the calling thread. It is never serialized.
+- The lookup is derived state: it is rebuilt on create, destroy, SetBounds, SetRotation, a
+  SetSurface that changes the axis, and snapshot restore, all on the calling thread. It is never
+  serialized.
 
 ## Geometry (deterministic math)
 
 Plane distances are taken against the body frame, at the predicted pose. `fluid.c` uses only
-`+ - * /`, `sqrtf`, `fabsf`, min/max, `b3Atan2` and a fixed-iteration Newton n-th root (the area
-cube root and the substep drag root). It never calls another libm function, so results are
-bit-identical across platforms and CRTs.
+`+ - * /`, `sqrtf`, `fabsf`, `fabs`, min/max, `b3Atan2`, `b3ComputeCosSin` (for the rotation) and a
+fixed-iteration Newton n-th root (the area cube root and the substep drag root). It never calls
+another libm function, so results are bit-identical across platforms and CRTs.
 
 - **Sphere:** the spherical cap `V = pi h^2 (3r - h) / 3` with `h = clamp(r - d, 0, 2r)`, and its
   closed-form centroid.
@@ -253,13 +282,15 @@ bit-identical across platforms and CRTs.
 - Sleeping bodies are not processed and keep their state. Floaters come to rest and sleep.
   Bodies in a current faster than their sleep threshold stay awake.
 - One helper decides waking for every volume mutator. It queries the dynamic tree over the old and
-  new bounds, each extended along `k` to the surface where the surface lies beyond them, then
+  new aabbs (see Volume lookup), each extended along `k` to the surface where the surface lies
+  beyond them, then
   decides per body with `r = |maxExtent|`:
   - **SetSurface:** wake unless the body is fully below both the old and new planes, or fully above
     both, and touches no other volume.
   - **SetDensity, SetDrag, SetFlowVelocity:** wake bodies not fully above the surface.
-  - **SetBounds, create and destroy:** wake the old and new regions, plus every body recorded in
-    that volume.
+  - **SetBounds, SetRotation, create and destroy:** wake the old and new regions, plus every body
+    recorded in that volume. A SetSurface that changes the axis of a rotated volume turns its
+    footprint, so it wakes the same way.
 - The body def setters wake a body that is in fluid when `enabled` or `displacedVolume` changes,
   and a sleeping body that is a candidate for a volume and not fully above its surface when
   `enabled` turns back on.
@@ -274,6 +305,8 @@ bit-identical across platforms and CRTs.
   upstream merge that takes the same code fails to compile on a duplicate `case` in replay.c. The
   batch setter records one op per element, as in `batch.c`.
 - No recording version bump: a minor mismatch already loads, and unknown opcodes are skipped.
+- Rotation added `FluidVolumeSetRotation` (0xF7) and a `rotation` after `bounds` in the recorded
+  volume def. Fork recordings with fluid volumes made before that do not replay.
 - `b3HashWorldState` covers only body transforms and velocities, so lost fluid state that does not
   change motion (the in-fluid record that drives events) is not reported as a divergence. The
   recording tests compare fluid state themselves.
@@ -283,7 +316,8 @@ bit-identical across platforms and CRTs.
 - It is flagged by a fork-reserved header bit (`0x80000000`). `B3_SNAP_VERSION` and the layout hash
   stay the same, so old recordings keep loading and fluid-free snapshots are byte-identical.
 - It holds the volume id pool, the full volume array (free slots included, userData nulled) and the
-  side table, with the struct sizes for its own check.
+  side table, with the struct sizes for its own check. The volume struct grew with rotation, so
+  older fluid snapshots fail that check.
 
 **Restore.**
 - It always tears the fluid world down first (in `b3FreeLiveSimElements`), then rebuilds it when the
@@ -347,9 +381,17 @@ receives it by value.
   a body under the floor stays dry; the point query.
 - **Volume lookup:** point queries and bodies match an all-volume scan of the documented rule in
   scenes of 8 to 200 volumes, at every bounds corner, edge and face and their float neighbours,
-  far from the origin, and after every kind of create, destroy, SetBounds and axis change; 64
-  abutting pools give bit-identical results with and without 30 dry decoys; inverted and extreme
-  footprints neither crash nor match.
+  far from the origin, and after every kind of create, destroy, SetBounds, SetRotation and axis
+  change; 64 abutting pools give bit-identical results with and without 30 dry decoys; inverted and
+  extreme footprints neither crash nor match.
+- **Rotation:** the lookup scan also turns volumes (both zeros, near-zero, eighth, quarter and half
+  turns, past a full turn, random), binned and not, and probes the turned corners and edges, their
+  neighbours, and the aabb corners outside the footprint. RotatedChannel checks a 45 and 30 degree
+  channel by hand; RotationZeroIdentity shows either zero runs bit-identical to an unturned volume
+  and that no-op turns wake nothing; WakeOnRotation covers turns off and onto sleepers and the
+  axis change of a turned volume; RotationApi, RotatedOffAxes (x and z axes) and RotatedDraft (the
+  same draft turned or not); turned inverted, huge (near `FLT_MAX`) and subnormal footprints; and
+  TurnedWorkerDeterminism for workers 1-5.
 - **Determinism:**
   - a fluid golden scene (sleep step, plus a hash of transforms, velocities and the ordered event
     stream) with float and double goldens, for workers 1-5 and in SIMDWidthTest;
@@ -358,7 +400,9 @@ receives it by value.
 - **Recording:** every new op in AllOps; a round trip with defs set before recording; a volume
   destroyed before recording plus a volume created during it; Restart, and a backward seek across
   a create; a replay in a different world slot than the recording; 20 volumes created, destroyed,
-  re-bounded and re-axed during a recording, replayed at 1 and 4 workers with Restart and a seek.
+  re-bounded, turned and re-axed during a recording, replayed at 1 and 4 workers with Restart and a
+  seek; FluidRotationRoundTrip, with a turn before recording starts and turns, zeros and a turned
+  axis change during it, checked frame by frame through seeks.
 - **Existing suite:** passes unchanged, goldens included.
 
 ## Sample
@@ -366,8 +410,8 @@ receives it by value.
 `Fluid` category in the samples app:
 
 - **Buoyancy:** a pool with mixed shapes and specific gravities, and sliders for density, drag,
-  surface height and flow.
-- **Current:** items sorting in a channel.
+  surface height, flow and rotation (the rotation turns the water only, not the walls).
+- **Current:** items sorting in a channel. An "Angle" control rebuilds the channel turned about y.
 - **Stress:** thousands of bodies, with the stage stats. A "Volumes" control splits the pool into 1,
   4, 16 or 64 abutting tiles and "Decoys" adds 0, 10 or 50 dry pools beside it, to show the stage
   cost staying flat as volumes are added.

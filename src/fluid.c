@@ -124,24 +124,54 @@ static float b3GetFluidSeparation( b3Plane plane, b3Pos point )
 					plane.offset );
 }
 
+// The point turned back about the bounds center is inside the footprint, see docs/fluid.md "Rotation"
+static bool b3IsInRotatedFootprint( const b3FluidVolume* volume, b3Pos point )
+{
+	int axis = volume->axis;
+	int axisA = axis == 2 ? 0 : axis + 1;
+	int axisB = axis == 0 ? 2 : axis - 1;
+
+	double lowerA = b3GetAxis( volume->bounds.lowerBound, axisA );
+	double upperA = b3GetAxis( volume->bounds.upperBound, axisA );
+	double lowerB = b3GetAxis( volume->bounds.lowerBound, axisB );
+	double upperB = b3GetAxis( volume->bounds.upperBound, axisB );
+	double halfA = 0.5 * ( upperA - lowerA );
+	double halfB = 0.5 * ( upperB - lowerB );
+	double da = b3GetPosAxis( point, axisA ) - 0.5 * ( lowerA + upperA );
+	double db = b3GetPosAxis( point, axisB ) - 0.5 * ( lowerB + upperB );
+
+	double c = volume->cosSin.cosine;
+	double s = volume->cosSin.sine;
+	double localA = c * da + s * db;
+	double localB = c * db - s * da;
+	return -halfA <= localA && localA <= halfA && -halfB <= localB && localB <= halfB;
+}
+
 // Inside the bounds off the vertical axis, at or above the bottom and at most radius above the top
 static bool b3IsFluidCandidate( const b3FluidVolume* volume, b3Pos point, float radius,
 								bool* contains )
 {
 	int axis = volume->axis;
-	for ( int i = 0; i < 3; ++i )
+	if ( volume->rotation == 0.0f )
 	{
-		if ( i == axis )
+		for ( int i = 0; i < 3; ++i )
 		{
-			continue;
-		}
+			if ( i == axis )
+			{
+				continue;
+			}
 
-		double p = b3GetPosAxis( point, i );
-		if ( ( b3GetAxis( volume->bounds.lowerBound, i ) <= p &&
-			   p <= b3GetAxis( volume->bounds.upperBound, i ) ) == false )
-		{
-			return false;
+			double p = b3GetPosAxis( point, i );
+			if ( ( b3GetAxis( volume->bounds.lowerBound, i ) <= p &&
+				   p <= b3GetAxis( volume->bounds.upperBound, i ) ) == false )
+			{
+				return false;
+			}
 		}
+	}
+	else if ( b3IsInRotatedFootprint( volume, point ) == false )
+	{
+		return false;
 	}
 
 	double p = b3GetPosAxis( point, axis );
@@ -168,13 +198,64 @@ static bool b3IsFluidCandidate( const b3FluidVolume* volume, b3Pos point, float 
 static bool b3IsFluidVolumeBinned( const b3FluidVolume* volume )
 {
 	float huge = B3_HUGE;
-	b3Vec3 lower = volume->bounds.lowerBound;
-	b3Vec3 upper = volume->bounds.upperBound;
+	b3Vec3 lower = volume->aabb.lowerBound;
+	b3Vec3 upper = volume->aabb.upperBound;
 	bool insideX =
 		-huge < lower.x && lower.x <= upper.x && upper.x < huge && upper.x - lower.x < 0.5f * huge;
 	bool insideZ =
 		-huge < lower.z && lower.z <= upper.z && upper.z < huge && upper.z - lower.z < 0.5f * huge;
 	return volume->axis == 1 && insideX && insideZ;
+}
+
+// Rounds to float, saturating at the float limit instead of overflowing to infinity
+static float b3SaturateToFloat( double value )
+{
+	if ( value < -FLT_MAX )
+	{
+		return -FLT_MAX;
+	}
+
+	return value > FLT_MAX ? FLT_MAX : (float)value;
+}
+
+// Caches the cosine and sine and the box around the turned footprint, padded past float rounding
+static void b3UpdateFluidVolumeAABB( b3FluidVolume* volume )
+{
+	if ( volume->rotation == 0.0f )
+	{
+		volume->cosSin = ( b3CosSin ){ 1.0f, 0.0f };
+		volume->aabb = volume->bounds;
+		return;
+	}
+
+	volume->cosSin = b3ComputeCosSin( volume->rotation );
+
+	int axis = volume->axis;
+	int axisA = axis == 2 ? 0 : axis + 1;
+	int axisB = axis == 0 ? 2 : axis - 1;
+
+	double lowerA = b3GetAxis( volume->bounds.lowerBound, axisA );
+	double upperA = b3GetAxis( volume->bounds.upperBound, axisA );
+	double lowerB = b3GetAxis( volume->bounds.lowerBound, axisB );
+	double upperB = b3GetAxis( volume->bounds.upperBound, axisB );
+	double centerA = 0.5 * ( lowerA + upperA );
+	double centerB = 0.5 * ( lowerB + upperB );
+	double halfA = 0.5 * ( upperA - lowerA );
+	double halfB = 0.5 * ( upperB - lowerB );
+
+	double c = fabs( (double)volume->cosSin.cosine );
+	double s = fabs( (double)volume->cosSin.sine );
+	double extentA = c * halfA + s * halfB;
+	double extentB = s * halfA + c * halfB;
+	double padA = ( fabs( centerA ) + fabs( extentA ) ) / 65536.0 + FLT_TRUE_MIN;
+	double padB = ( fabs( centerB ) + fabs( extentB ) ) / 65536.0 + FLT_TRUE_MIN;
+
+	b3AABB aabb = volume->bounds;
+	b3SetAxis( &aabb.lowerBound, axisA, b3SaturateToFloat( centerA - extentA - padA ) );
+	b3SetAxis( &aabb.upperBound, axisA, b3SaturateToFloat( centerA + extentA + padA ) );
+	b3SetAxis( &aabb.lowerBound, axisB, b3SaturateToFloat( centerB - extentB - padB ) );
+	b3SetAxis( &aabb.upperBound, axisB, b3SaturateToFloat( centerB + extentB + padB ) );
+	volume->aabb = aabb;
 }
 
 // Monotonic in p, so the cells of a footprint's ends bound the cell of every point inside it
@@ -208,7 +289,7 @@ void b3RebuildFluidLookup( b3FluidWorld* fluid )
 			continue;
 		}
 
-		grid = binnedCount == 0 ? volume->bounds : b3AABB_Union( grid, volume->bounds );
+		grid = binnedCount == 0 ? volume->aabb : b3AABB_Union( grid, volume->aabb );
 		binnedCount += 1;
 	}
 
@@ -255,7 +336,7 @@ void b3RebuildFluidLookup( b3FluidWorld* fluid )
 				continue;
 			}
 
-			b3AABB bounds = volume->bounds;
+			b3AABB bounds = volume->aabb;
 			float lowerX = grid.lowerBound.x;
 			float lowerZ = grid.lowerBound.z;
 			int x1 = b3GetFluidCell( bounds.lowerBound.x, lowerX, inverseCellSize, countX );
@@ -1500,10 +1581,10 @@ static void b3WakeFluidRegion( b3World* world, int volumeIndex, const b3FluidVol
 
 	b3FluidWakeContext context = { world, volumeIndex, *previous, rule };
 
-	b3AABB box = b3GetFluidWakeBox( volume->bounds, volume->surface );
+	b3AABB box = b3GetFluidWakeBox( volume->aabb, volume->surface );
 	b3DynamicTree_Query( tree, box, volume->maskBits, false, b3FluidWakeCallback, &context );
 
-	b3AABB previousBox = b3GetFluidWakeBox( previous->bounds, previous->surface );
+	b3AABB previousBox = b3GetFluidWakeBox( previous->aabb, previous->surface );
 	if ( memcmp( &box, &previousBox, sizeof( b3AABB ) ) != 0 )
 	{
 		b3DynamicTree_Query( tree, previousBox, previous->maskBits, false, b3FluidWakeCallback,
@@ -1540,6 +1621,7 @@ static void b3ValidateFluidVolumeDef( const b3FluidVolumeDef* def )
 {
 	B3_UNUSED( def );
 	B3_ASSERT( b3IsValidAABB( def->bounds ) );
+	B3_ASSERT( b3IsValidFloat( def->rotation ) );
 	B3_ASSERT( b3IsValidPlane( def->surface ) );
 	B3_ASSERT( b3IsValidFloat( def->density ) && def->density >= 0.0f );
 	B3_ASSERT( b3IsValidFloat( def->linearDrag ) && def->linearDrag >= 0.0f );
@@ -1586,6 +1668,7 @@ b3FluidVolumeId b3CreateFluidVolume( b3WorldId worldId, const b3FluidVolumeDef* 
 
 	b3FluidVolume* volume = b3Array_Get( fluid->volumes, volumeIndex );
 	volume->bounds = def->bounds;
+	volume->rotation = def->rotation;
 	volume->surface = def->surface;
 	volume->flowVelocity = def->flowVelocity;
 	volume->density = def->density;
@@ -1597,6 +1680,7 @@ b3FluidVolumeId b3CreateFluidVolume( b3WorldId worldId, const b3FluidVolumeDef* 
 	volume->id = volumeIndex;
 	volume->axis = b3GetFluidAxis( def->surface.normal );
 	volume->generation += 1;
+	b3UpdateFluidVolumeAABB( volume );
 
 	b3RebuildFluidLookup( fluid );
 
@@ -1671,6 +1755,7 @@ b3FluidVolumeDef b3FluidVolume_GetDef( b3FluidVolumeId volumeId )
 
 	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
 	def.bounds = volume->bounds;
+	def.rotation = volume->rotation;
 	def.surface = volume->surface;
 	def.density = volume->density;
 	def.linearDrag = volume->linearDrag;
@@ -1704,13 +1789,28 @@ void b3FluidVolume_SetSurface( b3FluidVolumeId volumeId, b3Plane surface )
 	volume->surface = surface;
 	volume->axis = b3GetFluidAxis( surface.normal );
 
-	if ( volume->axis != previous.axis )
+	if ( volume->axis == previous.axis )
 	{
-		b3RebuildFluidLookup( world->fluid );
+		world->locked = true;
+		b3WakeFluidRegion( world, volume->id, &previous, b3_fluidWakeSurface );
+		world->locked = false;
+		return;
 	}
 
+	b3UpdateFluidVolumeAABB( volume );
+	b3RebuildFluidLookup( world->fluid );
+
+	// A rotated footprint turns about the new axis, so the region moves like a bounds change
 	world->locked = true;
-	b3WakeFluidRegion( world, volume->id, &previous, b3_fluidWakeSurface );
+	if ( volume->rotation != 0.0f )
+	{
+		b3WakeFluidMembers( world, volumeId, false );
+		b3WakeFluidRegion( world, volume->id, &previous, b3_fluidWakeRegion );
+	}
+	else
+	{
+		b3WakeFluidRegion( world, volume->id, &previous, b3_fluidWakeSurface );
+	}
 	world->locked = false;
 }
 
@@ -1734,6 +1834,36 @@ void b3FluidVolume_SetBounds( b3FluidVolumeId volumeId, b3AABB bounds )
 
 	b3FluidVolume previous = *volume;
 	volume->bounds = bounds;
+	b3UpdateFluidVolumeAABB( volume );
+	b3RebuildFluidLookup( world->fluid );
+
+	world->locked = true;
+	b3WakeFluidMembers( world, volumeId, false );
+	b3WakeFluidRegion( world, volume->id, &previous, b3_fluidWakeRegion );
+	world->locked = false;
+}
+
+void b3FluidVolume_SetRotation( b3FluidVolumeId volumeId, float rotation )
+{
+	B3_ASSERT( b3IsValidFloat( rotation ) );
+
+	b3World* world = b3GetUnlockedWorld( volumeId.world0 );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	B3_REC( world, FluidVolumeSetRotation, volumeId, rotation );
+
+	b3FluidVolume* volume = b3GetFluidVolumeFullId( world, volumeId );
+	if ( volume->rotation == rotation )
+	{
+		return;
+	}
+
+	b3FluidVolume previous = *volume;
+	volume->rotation = rotation;
+	b3UpdateFluidVolumeAABB( volume );
 	b3RebuildFluidLookup( world->fluid );
 
 	world->locked = true;

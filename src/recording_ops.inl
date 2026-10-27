@@ -248,3 +248,4 @@ B3_REC_OP( 0xFA, FluidVolumeSetDrag, RET_NONE,
 		   ARG( FLUIDVOLUMEID, volume ) ARG( F32, linearDrag ) ARG( F32, angularDrag ) ARG( F32, quadraticDrag ) )
 B3_REC_OP( 0xF9, FluidVolumeSetDensity, RET_NONE, ARG( FLUIDVOLUMEID, volume ) ARG( F32, density ) )
 B3_REC_OP( 0xF8, BodySetFluidDef, RET_NONE, ARG( BODYID, body ) ARG( BODYFLUIDDEF, def ) )
+B3_REC_OP( 0xF7, FluidVolumeSetRotation, RET_NONE, ARG( FLUIDVOLUMEID, volume ) ARG( F32, rotation ) )

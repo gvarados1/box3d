@@ -567,6 +567,7 @@ void b3RecW_FLUIDVOLUMEID( b3RecBuffer* buf, b3FluidVolumeId v )
 void b3RecW_FLUIDVOLUMEDEF( b3RecBuffer* buf, b3FluidVolumeDef v )
 {
 	b3RecW_AABB( buf, v.bounds );
+	b3RecW_F32( buf, v.rotation );
 	b3RecW_PLANE( buf, v.surface );
 	b3RecW_F32( buf, v.density );
 	b3RecW_F32( buf, v.linearDrag );

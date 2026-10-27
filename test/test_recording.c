@@ -1622,11 +1622,14 @@ static int AllOps( void )
 	ENSURE( b3FluidVolume_IsValid( poolId ) );
 	b3FluidVolume_SetSurface( poolId, (b3Plane){ { 0.0f, 1.0f, 0.0f }, 5.2f } );
 	b3FluidVolume_SetBounds( poolId, (b3AABB){ { -16.0f, -1.0f, -5.0f }, { 16.0f, 6.0f, 5.0f } } );
+	b3FluidVolume_SetRotation( poolId, 0.1f );
 	b3FluidVolume_SetFlowVelocity( poolId, (b3Vec3){ 0.2f, 0.0f, 0.0f } );
 	b3FluidVolume_SetDrag( poolId, 2.0f, 1.0f, 0.5f );
 	b3FluidVolume_SetDensity( poolId, 1.6f );
 
-	b3FluidVolumeId tmpVolumeId = b3CreateFluidVolume( worldId, &poolDef );
+	b3FluidVolumeDef tmpVolumeDef = poolDef;
+	tmpVolumeDef.rotation = -0.4f;
+	b3FluidVolumeId tmpVolumeId = b3CreateFluidVolume( worldId, &tmpVolumeDef );
 	ENSURE( b3FluidVolume_IsValid( tmpVolumeId ) );
 	b3DestroyFluidVolume( tmpVolumeId );
 
@@ -1810,6 +1813,7 @@ static int AllOps( void )
 		b3WorldId replayWorldId = b3RecPlayer_GetWorldId( player );
 		b3FluidVolumeDef replayPoolDef = b3FluidVolume_GetDef( ToWorldVolumeId( poolId, replayWorldId ) );
 		ENSURE( replayPoolDef.surface.offset == 5.2f && replayPoolDef.density == 1.4f && replayPoolDef.quadraticDrag == 0.5f );
+		ENSURE( replayPoolDef.rotation == 0.1f );
 		ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( tmpVolumeId, replayWorldId ) ) == false );
 		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( hullBodyId, replayWorldId ) ).displacedVolume == 0.5f );
 		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( capsuleBodyId, replayWorldId ) ).dragScale == 2.0f );
@@ -3177,8 +3181,9 @@ static void CreateManyVolumeScene( b3WorldId worldId, b3BodyId* bodyIds )
 	b3CreateSphereShape( bodyIds[MANY_BODY_COUNT - 1], &shapeDef, &ball );
 }
 
-// Twenty volumes, binned and unbinned, created, destroyed, re-bounded and turned during recording.
-// Replays at 1 and 4 workers check every frame, restart, and seek back across a destroy and create.
+// Twenty volumes, binned and unbinned, created, destroyed, re-bounded, re-axed and rotated during
+// recording. Replays at 1 and 4 workers check every frame, restart, and seek back across a destroy and
+// create.
 static int FluidManyVolumes( void )
 {
 	enum
@@ -3272,6 +3277,10 @@ static int FluidManyVolumes( void )
 			case 10:
 				b3FluidVolume_SetBounds( tileIds[5], grownBounds );
 				break;
+			case 15:
+				// Rotated before its axis changes and changes back
+				b3FluidVolume_SetRotation( tileIds[6], -0.5f );
+				break;
 			case 20:
 				// Two tiles turn to the x axis and leave the grid, one reaching the ball
 				b3FluidVolume_SetSurface( tileIds[4], (b3Plane){ { -1.0f, 0.0f, 0.0f }, 12.5f } );
@@ -3281,6 +3290,9 @@ static int FluidManyVolumes( void )
 				// A decoy joins the grid and stretches it
 				b3FluidVolume_SetSurface( decoyIds[3], (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.0f } );
 				break;
+			case 30:
+				b3FluidVolume_SetRotation( tileIds[7], 0.4f );
+				break;
 			case 35:
 				b3FluidVolume_SetSurface( tileIds[4], ManyTileDef( 4 ).surface );
 				b3FluidVolume_SetSurface( tileIds[6], (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.3f } );
@@ -3289,6 +3301,9 @@ static int FluidManyVolumes( void )
 				// The new tile takes the slot with the next generation
 				b3DestroyFluidVolume( tileIds[9] );
 				swapId = b3CreateFluidVolume( worldId, &swapDef );
+				break;
+			case 50:
+				b3FluidVolume_SetRotation( decoyIds[3], 1.0f );
 				break;
 			case destroyFrame:
 				b3DestroyFluidVolume( tileIds[2] );
@@ -3301,11 +3316,17 @@ static int FluidManyVolumes( void )
 			case 90:
 				b3FluidVolume_SetBounds( decoyIds[0], movedDecoyBounds );
 				break;
+			case 95:
+				b3FluidVolume_SetRotation( tileIds[7], 0.0f );
+				break;
 			case 100:
 				b3FluidVolume_SetSurface( tileIds[0], (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.6f } );
 				break;
 			case 105:
 				b3FluidVolume_SetBounds( tileIds[5], ManyTileDef( 5 ).bounds );
+				break;
+			case 110:
+				b3FluidVolume_SetRotation( tileIds[1], 1000.0f );
 				break;
 			default:
 				break;
@@ -3395,6 +3416,7 @@ static int FluidManyVolumes( void )
 				ENSURE( memcmp( &def.surface, &liveDefs[i].surface, sizeof( b3Plane ) ) == 0 );
 				ENSURE( memcmp( &def.flowVelocity, &liveDefs[i].flowVelocity, sizeof( b3Vec3 ) ) ==
 						0 );
+				ENSURE( memcmp( &def.rotation, &liveDefs[i].rotation, sizeof( float ) ) == 0 );
 			}
 
 			b3RecPlayer_Restart( player );
@@ -3446,6 +3468,245 @@ static int FluidManyVolumes( void )
 	return 0;
 }
 
+#define ROTATION_FRAME_COUNT 100
+
+// Each frame of the rotation recording, for the replays to match
+typedef struct RotationFrames
+{
+	uint64_t stateHashes[ROTATION_FRAME_COUNT + 1];
+	uint64_t fluidHashes[ROTATION_FRAME_COUNT + 1];
+	uint64_t lookupHashes[ROTATION_FRAME_COUNT + 1];
+	float channelTurns[ROTATION_FRAME_COUNT + 1];
+	float sideTurns[ROTATION_FRAME_COUNT + 1];
+} RotationFrames;
+
+// Point lookups and depths over a grid across the rotation scene, so a stale lookup after a seek shows
+static uint64_t HashFluidLookup( b3WorldId worldId )
+{
+	uint64_t hash = B3_SNAP_FNV_INIT;
+	for ( int i = 0; i < 21 * 11; ++i )
+	{
+		b3Pos point = { -10.0f + (float)( i % 21 ), 1.0f, -5.0f + (float)( i / 21 ) };
+		float depth = 0.0f;
+		b3FluidVolumeId volumeId = b3World_FindFluidVolume( worldId, point, &depth );
+		hash = HashFullId( hash, volumeId.index1, volumeId.world0, volumeId.generation, worldId );
+		hash = HashBytes( hash, &depth, (int)sizeof( float ) );
+	}
+	return hash;
+}
+
+// The rotation of a live volume, else a value no test sets
+static float GetVolumeRotation( b3FluidVolumeId volumeId )
+{
+	return b3FluidVolume_IsValid( volumeId ) ? b3FluidVolume_GetDef( volumeId ).rotation : -1.0e30f;
+}
+
+static void RecordRotationFrame( RotationFrames* frames, b3WorldId worldId, const b3BodyId* bodyIds, b3FluidVolumeId channelId,
+								 b3FluidVolumeId sideId, int frame )
+{
+	frames->stateHashes[frame] = b3HashWorldState( b3GetWorldFromId( worldId ) );
+	frames->fluidHashes[frame] = HashFluidState( worldId, bodyIds, FLUID_BODY_COUNT );
+	frames->lookupHashes[frame] = HashFluidLookup( worldId );
+	frames->channelTurns[frame] = GetVolumeRotation( channelId );
+	frames->sideTurns[frame] = GetVolumeRotation( sideId );
+}
+
+// Compares a replay world with the recorded frame, rotations bit for bit
+static int CheckRotationFrame( const RotationFrames* frames, b3WorldId worldId, const b3BodyId* bodyIds,
+							   b3FluidVolumeId channelId, b3FluidVolumeId sideId, int frame )
+{
+	RotationFrames replayed;
+	RecordRotationFrame( &replayed, worldId, bodyIds, ToWorldVolumeId( channelId, worldId ), ToWorldVolumeId( sideId, worldId ),
+						 frame );
+
+	bool state = replayed.stateHashes[frame] == frames->stateHashes[frame];
+	bool fluid = replayed.fluidHashes[frame] == frames->fluidHashes[frame];
+	bool lookup = replayed.lookupHashes[frame] == frames->lookupHashes[frame];
+	bool turns = memcmp( replayed.channelTurns + frame, frames->channelTurns + frame, sizeof( float ) ) == 0 &&
+				 memcmp( replayed.sideTurns + frame, frames->sideTurns + frame, sizeof( float ) ) == 0;
+	if ( state && fluid && lookup && turns )
+	{
+		return 0;
+	}
+
+	printf( "  rotation replay frame %d: state %d fluid %d lookup %d turns %d (channel %g side %g)\n", frame, state, fluid,
+			lookup, turns, replayed.channelTurns[frame], replayed.sideTurns[frame] );
+	return 1;
+}
+
+// A channel rotated before the recording starts, so the seed snapshot carries the rotation, then a volume
+// created rotated, rotations, one back to zero, one far past a full turn, and an axis change while rotated.
+// Replays at 1 and 4 workers match every frame's state, fluid state, rotations and point lookups, through
+// Restart, a seek past the rotations and back before them, and a seek onto every frame.
+static int FluidRotationRoundTrip( void )
+{
+	enum
+	{
+		frameCount = ROTATION_FRAME_COUNT,
+		turnFrame = 20,
+		createFrame = 35,
+		zeroFrame = 50,
+		unwoundFrame = 55,
+		axisFrame = 65,
+		axisBackFrame = 80,
+		lastTurnFrame = 90,
+	};
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = 1;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyId bodyIds[FLUID_BODY_COUNT];
+	CreateFluidScene( worldId, bodyIds );
+
+	// A 4 m wide channel along x, rotated so its sides pass about 6 m from the middle
+	b3FluidVolumeDef channelDef = FluidPoolDef();
+	channelDef.bounds = (b3AABB){ { -10.0f, -1.0f, -2.0f }, { 10.0f, 6.0f, 2.0f } };
+	channelDef.rotation = 0.35f;
+	b3FluidVolumeId channelId = b3CreateFluidVolume( worldId, &channelDef );
+
+	float timeStep = 1.0f / 60.0f;
+	int subStepCount = 4;
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, timeStep, subStepCount );
+	}
+
+	for ( int i = 0; i < FLUID_BODY_COUNT; ++i )
+	{
+		ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( bodyIds[i] ), channelId ) );
+	}
+
+	b3Recording* rec = b3CreateRecording( 0 );
+	ENSURE( rec != NULL );
+	b3World_StartRecording( worldId, rec );
+
+	// Higher water over the right side, rotated so it holds the body at x = 3 but not the one at x = 1
+	b3FluidVolumeDef sideDef = FluidPoolDef();
+	sideDef.bounds = (b3AABB){ { 1.0f, -1.0f, -1.0f }, { 5.0f, 6.0f, 1.0f } };
+	sideDef.surface.offset = 2.6f;
+	sideDef.rotation = -0.7f;
+	b3FluidVolumeId sideId = b3_nullFluidVolumeId;
+
+	RotationFrames frames = { 0 };
+	int beginCount = 0;
+	int endCount = 0;
+
+	for ( int i = 1; i <= frameCount; ++i )
+	{
+		switch ( i )
+		{
+			case turnFrame:
+				// The sides now pass about 2 m from the middle, so the outer bodies leave
+				b3FluidVolume_SetRotation( channelId, 1.2f );
+				break;
+			case createFrame:
+				sideId = b3CreateFluidVolume( worldId, &sideDef );
+				break;
+			case zeroFrame:
+				b3FluidVolume_SetRotation( channelId, 0.0f );
+				break;
+			case unwoundFrame:
+				b3FluidVolume_SetRotation( sideId, 1000.0f );
+				break;
+			case axisFrame:
+				b3FluidVolume_SetSurface( sideId, (b3Plane){ { 1.0f, 0.0f, 0.0f }, 4.0f } );
+				break;
+			case axisBackFrame:
+				b3FluidVolume_SetSurface( sideId, sideDef.surface );
+				break;
+			case lastTurnFrame:
+				b3FluidVolume_SetRotation( channelId, -0.9f );
+				break;
+			default:
+				break;
+		}
+
+		b3World_Step( worldId, timeStep, subStepCount );
+		RecordRotationFrame( &frames, worldId, bodyIds, channelId, sideId, i );
+
+		b3FluidEvents events = b3World_GetFluidEvents( worldId );
+		beginCount += events.beginCount;
+		endCount += events.endCount;
+	}
+
+	b3World_StopRecording( worldId );
+	b3DestroyWorld( worldId );
+
+	// The rotations moved bodies in and out, and changed the lookup
+	ENSURE( beginCount > 0 && endCount > 0 );
+	ENSURE( frames.lookupHashes[turnFrame - 1] != frames.lookupHashes[turnFrame] );
+	ENSURE( frames.lookupHashes[unwoundFrame - 1] != frames.lookupHashes[unwoundFrame] );
+
+	const uint8_t* data = b3Recording_GetData( rec );
+	int size = b3Recording_GetSize( rec );
+
+	ENSURE( b3ValidateReplay( data, size, 1 ) );
+	ENSURE( b3ValidateReplay( data, size, 4 ) );
+
+	const int workerCounts[2] = { 1, 4 };
+	for ( int w = 0; w < 2; ++w )
+	{
+		b3RecPlayer* player = b3CreatePlayer( data, size, workerCounts[w] );
+		ENSURE( player != NULL );
+		b3RecPlayer_SetKeyframePolicy( player, b3RecPlayer_GetKeyframeBudget( player ), 4 );
+		b3WorldId replayId = b3RecPlayer_GetWorldId( player );
+
+		for ( int pass = 0; pass < 2; ++pass )
+		{
+			ENSURE( b3RecPlayer_GetFrame( player ) == 0 );
+			ENSURE( GetVolumeRotation( ToWorldVolumeId( channelId, replayId ) ) == 0.35f );
+			ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( sideId, replayId ) ) == false );
+
+			while ( b3RecPlayer_StepFrame( player ) )
+			{
+				int frame = b3RecPlayer_GetFrame( player );
+				ENSURE( 0 < frame && frame <= frameCount );
+				ENSURE( CheckRotationFrame( &frames, replayId, bodyIds, channelId, sideId, frame ) == 0 );
+			}
+
+			ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+			ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+
+			b3RecPlayer_Restart( player );
+			ENSURE( b3StoreWorldId( b3RecPlayer_GetWorldId( player ) ) == b3StoreWorldId( replayId ) );
+		}
+
+		// Forward past the rotation back to zero, back before the first rotation, then across all of them
+		b3RecPlayer_SeekFrame( player, zeroFrame + 2 );
+		ENSURE( b3RecPlayer_GetFrame( player ) == zeroFrame + 2 );
+		ENSURE( GetVolumeRotation( ToWorldVolumeId( channelId, replayId ) ) == 0.0f );
+		ENSURE( CheckRotationFrame( &frames, replayId, bodyIds, channelId, sideId, zeroFrame + 2 ) == 0 );
+
+		b3RecPlayer_SeekFrame( player, turnFrame - 2 );
+		ENSURE( b3RecPlayer_GetFrame( player ) == turnFrame - 2 );
+		ENSURE( GetVolumeRotation( ToWorldVolumeId( channelId, replayId ) ) == 0.35f );
+		ENSURE( CheckRotationFrame( &frames, replayId, bodyIds, channelId, sideId, turnFrame - 2 ) == 0 );
+
+		while ( b3RecPlayer_GetFrame( player ) < frameCount && b3RecPlayer_StepFrame( player ) )
+		{
+			int frame = b3RecPlayer_GetFrame( player );
+			ENSURE( CheckRotationFrame( &frames, replayId, bodyIds, channelId, sideId, frame ) == 0 );
+		}
+
+		ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+
+		// Each seek restores a keyframe and rebuilds the lookup
+		for ( int target = frameCount - 1; target > 0; --target )
+		{
+			b3RecPlayer_SeekFrame( player, target );
+			ENSURE( b3RecPlayer_GetFrame( player ) == target );
+			ENSURE( CheckRotationFrame( &frames, replayId, bodyIds, channelId, sideId, target ) == 0 );
+		}
+
+		ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+		b3DestroyPlayer( player );
+	}
+
+	b3DestroyRecording( rec );
+	return 0;
+}
+
 int RecordingTest( void )
 {
 	RUN_SUBTEST( GeometryHashCollision );
@@ -3472,6 +3733,7 @@ int RecordingTest( void )
 	RUN_SUBTEST( FluidReplayWorldSlot );
 	RUN_SUBTEST( FluidSnapshotSection );
 	RUN_SUBTEST( FluidManyVolumes );
+	RUN_SUBTEST( FluidRotationRoundTrip );
 	RUN_SUBTEST( ReservedHeaderBytes );
 	RUN_SUBTEST( CorruptCompound );
 	return 0;

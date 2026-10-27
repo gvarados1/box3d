@@ -33,8 +33,13 @@ static const b3FluidVolumeId b3_nullFluidVolumeId = B3_NULL_ID;
 /// Describes a fluid volume. The fluid fills the bounds below the surface plane.
 typedef struct b3FluidVolumeDef
 {
-	/// Region the fluid can occupy, in world space.
+	/// Region the fluid can occupy, in world space, before the rotation.
 	b3AABB bounds;
+
+	/// Turn of the bounds about their center around the vertical axis, in radians (right-handed, so
+	/// for a y axis +x turns toward -z). The vertical axis is the bounds axis most aligned with the
+	/// surface normal. Zero keeps the bounds axis-aligned.
+	float rotation;
 
 	/// Fluid surface. The normal points out of the fluid and must be unit length.
 	b3Plane surface;
@@ -144,6 +149,9 @@ B3_API void b3FluidVolume_SetSurface( b3FluidVolumeId volumeId, b3Plane surface 
 
 /// Set the bounds. Wakes bodies in the old and new region.
 B3_API void b3FluidVolume_SetBounds( b3FluidVolumeId volumeId, b3AABB bounds );
+
+/// Set the rotation about the vertical axis, in radians. Wakes bodies in the old and new region.
+B3_API void b3FluidVolume_SetRotation( b3FluidVolumeId volumeId, float rotation );
 
 /// Set the current. Wakes bodies in the fluid.
 B3_API void b3FluidVolume_SetFlowVelocity( b3FluidVolumeId volumeId, b3Vec3 flowVelocity );

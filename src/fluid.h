@@ -28,6 +28,12 @@ enum b3FluidBodyFlags
 typedef struct b3FluidVolume
 {
 	b3AABB bounds;
+
+	// Encloses the rotated bounds for the lookup grid and wake queries; equals bounds when unrotated
+	b3AABB aabb;
+
+	float rotation;
+	b3CosSin cosSin;
 	b3Plane surface;
 	b3Vec3 flowVelocity;
 	float density;

@@ -668,6 +668,7 @@ b3FluidVolumeDef b3RecR_FLUIDVOLUMEDEF( b3RecReader* rdr )
 {
 	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
 	def.bounds = b3RecR_AABB( rdr );
+	def.rotation = b3RecR_F32( rdr );
 	def.surface = b3RecR_PLANE( rdr );
 	def.density = b3RecR_F32( rdr );
 	def.linearDrag = b3RecR_F32( rdr );
@@ -1762,6 +1763,11 @@ static void b3RecDispatch_FluidVolumeSetSurface( const b3RecArgs_FluidVolumeSetS
 static void b3RecDispatch_FluidVolumeSetBounds( const b3RecArgs_FluidVolumeSetBounds* a, b3RecReader* rdr )
 {
 	b3FluidVolume_SetBounds( b3RecMakeFluidVolumeId( rdr, a->volume ), a->bounds );
+}
+
+static void b3RecDispatch_FluidVolumeSetRotation( const b3RecArgs_FluidVolumeSetRotation* a, b3RecReader* rdr )
+{
+	b3FluidVolume_SetRotation( b3RecMakeFluidVolumeId( rdr, a->volume ), a->rotation );
 }
 
 static void b3RecDispatch_FluidVolumeSetFlowVelocity( const b3RecArgs_FluidVolumeSetFlowVelocity* a, b3RecReader* rdr )
