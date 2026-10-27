@@ -342,6 +342,10 @@ _Static_assert( sizeof( void* ) != 8 || sizeof( b3WeldJointDef ) == 128,
 				"b3WeldJointDef changed: update b3RecW_WELDJOINTDEF and its reader together" );
 _Static_assert( sizeof( void* ) != 8 || sizeof( b3WheelJointDef ) == 184,
 				"b3WheelJointDef changed: update b3RecW_WHEELJOINTDEF and its reader together" );
+_Static_assert( sizeof( void* ) != 8 || sizeof( b3FluidVolumeDef ) == 96,
+				"b3FluidVolumeDef changed: update b3RecW_FLUIDVOLUMEDEF and b3RecR_FLUIDVOLUMEDEF together" );
+_Static_assert( sizeof( void* ) != 8 || sizeof( b3BodyFluidDef ) == 12,
+				"b3BodyFluidDef changed: update b3RecW_BODYFLUIDDEF and b3RecR_BODYFLUIDDEF together" );
 
 void b3RecW_EXPLOSIONDEF( b3RecBuffer* buf, b3ExplosionDef v )
 {
@@ -548,6 +552,40 @@ void b3RecW_WHEELJOINTDEF( b3RecBuffer* buf, b3WheelJointDef v )
 	b3RecW_F32( buf, v.upperSteeringLimit );
 }
 
+void b3RecW_PLANE( b3RecBuffer* buf, b3Plane v )
+{
+	b3RecW_VEC3( buf, v.normal );
+	b3RecW_F32( buf, v.offset );
+}
+
+// Packed like b3StoreJointId
+void b3RecW_FLUIDVOLUMEID( b3RecBuffer* buf, b3FluidVolumeId v )
+{
+	b3RecW_U64( buf, ( (uint64_t)v.index1 << 32 ) | ( (uint64_t)v.world0 ) << 16 | (uint64_t)v.generation );
+}
+
+void b3RecW_FLUIDVOLUMEDEF( b3RecBuffer* buf, b3FluidVolumeDef v )
+{
+	b3RecW_AABB( buf, v.bounds );
+	b3RecW_PLANE( buf, v.surface );
+	b3RecW_F32( buf, v.density );
+	b3RecW_F32( buf, v.linearDrag );
+	b3RecW_F32( buf, v.angularDrag );
+	b3RecW_F32( buf, v.quadraticDrag );
+	b3RecW_VEC3( buf, v.flowVelocity );
+	b3RecW_U64( buf, v.maskBits );
+	// userData: not preserved
+	b3RecW_U64( buf, 0u );
+	// internalValue omitted
+}
+
+void b3RecW_BODYFLUIDDEF( b3RecBuffer* buf, b3BodyFluidDef v )
+{
+	b3RecW_F32( buf, v.displacedVolume );
+	b3RecW_F32( buf, v.dragScale );
+	b3RecW_BOOL( buf, v.enabled );
+}
+
 // Query recording. A query collects a variable number of hits through a user callback, so the count
 // is not known until the callback stops firing. The record is built in a local buffer with a
 // reserved hit-count slot, then committed whole under the lock so concurrent query threads never
@@ -728,6 +766,7 @@ void b3RecEndRecord( b3Recording* rec )
 #define B3_REC_RETWRITE_RET_BODYID( op, Name ) B3_REC_RETWRITE( op, Name, b3BodyId, b3RecW_BODYID )
 #define B3_REC_RETWRITE_RET_SHAPEID( op, Name ) B3_REC_RETWRITE( op, Name, b3ShapeId, b3RecW_SHAPEID )
 #define B3_REC_RETWRITE_RET_JOINTID( op, Name ) B3_REC_RETWRITE( op, Name, b3JointId, b3RecW_JOINTID )
+#define B3_REC_RETWRITE_RET_FLUIDVOLUMEID( op, Name ) B3_REC_RETWRITE( op, Name, b3FluidVolumeId, b3RecW_FLUIDVOLUMEID )
 #define B3_REC_OP( op, Name, RET, ... ) B3_REC_RETWRITE_##RET( op, Name )
 #include "recording_ops.inl"
 #undef B3_REC_OP
@@ -735,6 +774,7 @@ void b3RecEndRecord( b3Recording* rec )
 #undef B3_REC_RETWRITE_RET_BODYID
 #undef B3_REC_RETWRITE_RET_SHAPEID
 #undef B3_REC_RETWRITE_RET_JOINTID
+#undef B3_REC_RETWRITE_RET_FLUIDVOLUMEID
 #undef B3_REC_RETWRITE
 
 // Geometry registry

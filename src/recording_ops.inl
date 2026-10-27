@@ -237,3 +237,14 @@ B3_REC_OP( 0xF1, StateHash, RET_NONE, ARG( WORLDID, world ) ARG( U64, hash ) )
 
 // Accumulated world bounds over the whole recording, written once at stop.
 B3_REC_OP( 0xF2, RecordingBounds, RET_NONE, ARG( AABB, bounds ) )
+
+// MineMogul fork ops (docs/fluid.md), allocated down from 0xFF; an upstream clash fails to compile
+B3_REC_OP( 0xFF, CreateFluidVolume, RET_FLUIDVOLUMEID, ARG( WORLDID, world ) ARG( FLUIDVOLUMEDEF, def ) )
+B3_REC_OP( 0xFE, DestroyFluidVolume, RET_NONE, ARG( FLUIDVOLUMEID, volume ) )
+B3_REC_OP( 0xFD, FluidVolumeSetSurface, RET_NONE, ARG( FLUIDVOLUMEID, volume ) ARG( PLANE, surface ) )
+B3_REC_OP( 0xFC, FluidVolumeSetBounds, RET_NONE, ARG( FLUIDVOLUMEID, volume ) ARG( AABB, bounds ) )
+B3_REC_OP( 0xFB, FluidVolumeSetFlowVelocity, RET_NONE, ARG( FLUIDVOLUMEID, volume ) ARG( VEC3, flowVelocity ) )
+B3_REC_OP( 0xFA, FluidVolumeSetDrag, RET_NONE,
+		   ARG( FLUIDVOLUMEID, volume ) ARG( F32, linearDrag ) ARG( F32, angularDrag ) ARG( F32, quadraticDrag ) )
+B3_REC_OP( 0xF9, FluidVolumeSetDensity, RET_NONE, ARG( FLUIDVOLUMEID, volume ) ARG( F32, density ) )
+B3_REC_OP( 0xF8, BodySetFluidDef, RET_NONE, ARG( BODYID, body ) ARG( BODYFLUIDDEF, def ) )

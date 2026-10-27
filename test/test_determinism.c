@@ -31,6 +31,9 @@
 #define QUERY_SPAWN_QUERY_HASH 0x5B4429DC
 #define MESH_DROP_SLEEP_STEP 197
 #define MESH_DROP_HASH 0xDB70AA21
+#define FLUID_POOL_SLEEP_STEP 508
+#define FLUID_POOL_HASH 0x4686554A
+#define FLUID_POOL_EVENT_HASH 0x8DD1C9DB
 #else
 #define RAGDOLL_SLEEP_STEP 324
 #define RAGDOLL_HASH 0x31161417
@@ -42,6 +45,9 @@
 #define QUERY_SPAWN_QUERY_HASH 0xE3271F3D
 #define MESH_DROP_SLEEP_STEP 197
 #define MESH_DROP_HASH 0xF27AEDE3
+#define FLUID_POOL_SLEEP_STEP 508
+#define FLUID_POOL_HASH 0x682754CC
+#define FLUID_POOL_EVENT_HASH 0x75F94A41
 #endif
 
 // The goldens above pin exact values for the default four point manifold. A build that
@@ -59,11 +65,12 @@ typedef struct DeterminismResult
 	uint32_t hash;
 	int queryHitCount;
 	uint32_t queryHash;
+	uint32_t eventHash;
 	bool seeded;
 } DeterminismResult;
 
-// Every worker count has to reproduce the first run exactly. Scenarios without queries leave
-// the query fields zero in both the reference and the result.
+// Every worker count has to reproduce the first run exactly. Scenarios without queries or events
+// leave those fields zero in both the reference and the result.
 static int EnsureRepeatable( DeterminismResult* reference, DeterminismResult result )
 {
 	if ( reference->seeded == false )
@@ -77,11 +84,23 @@ static int EnsureRepeatable( DeterminismResult* reference, DeterminismResult res
 	ENSURE( result.hash == reference->hash );
 	ENSURE( result.queryHitCount == reference->queryHitCount );
 	ENSURE( result.queryHash == reference->queryHash );
+	ENSURE( result.eventHash == reference->eventHash );
 
 	return 0;
 }
 
-static int SingleMultithreadingTest( int workerCount, DeterminismResult* reference )
+typedef enum RagdollFluid
+{
+	ragdollFluidNone,
+
+	// Bounds contain the ragdolls but the surface lies below them
+	ragdollFluidBelow,
+
+	// Would submerge the ragdolls but is destroyed before the first step
+	ragdollFluidDestroyed,
+} RagdollFluid;
+
+static FallingRagdollData RunFallingRagdolls( int workerCount, RagdollFluid fluid )
 {
 	b3WorldDef worldDef = b3DefaultWorldDef();
 	worldDef.workerCount = workerCount;
@@ -89,6 +108,24 @@ static int SingleMultithreadingTest( int workerCount, DeterminismResult* referen
 	b3WorldId worldId = b3CreateWorld( &worldDef );
 
 	FallingRagdollData data = CreateFallingRagdolls( worldId );
+
+	if ( fluid != ragdollFluidNone )
+	{
+		b3FluidVolumeDef volumeDef = b3DefaultFluidVolumeDef();
+		volumeDef.bounds = (b3AABB){ { -50.0f, -20.0f, -50.0f }, { 50.0f, 50.0f, 50.0f } };
+		volumeDef.flowVelocity = (b3Vec3){ 1.0f, 0.0f, 0.5f };
+
+		if ( fluid == ragdollFluidBelow )
+		{
+			volumeDef.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, -3.0f };
+			b3CreateFluidVolume( worldId, &volumeDef );
+		}
+		else
+		{
+			volumeDef.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 30.0f };
+			b3DestroyFluidVolume( b3CreateFluidVolume( worldId, &volumeDef ) );
+		}
+	}
 
 	float timeStep = 1.0f / 60.0f;
 
@@ -107,6 +144,14 @@ static int SingleMultithreadingTest( int workerCount, DeterminismResult* referen
 	}
 
 	b3DestroyWorld( worldId );
+	DestroyFallingRagdolls( &data );
+
+	return data;
+}
+
+static int SingleMultithreadingTest( int workerCount, DeterminismResult* reference )
+{
+	FallingRagdollData data = RunFallingRagdolls( workerCount, ragdollFluidNone );
 
 	if ( data.sleepStep != RAGDOLL_SLEEP_STEP || data.hash != RAGDOLL_HASH )
 	{
@@ -116,8 +161,6 @@ static int SingleMultithreadingTest( int workerCount, DeterminismResult* referen
 	ENSURE_GOLDEN( data.sleepStep == RAGDOLL_SLEEP_STEP );
 	ENSURE_GOLDEN( data.hash == RAGDOLL_HASH );
 	ENSURE( EnsureRepeatable( reference, (DeterminismResult){ .sleepStep = data.sleepStep, .hash = data.hash } ) == 0 );
-
-	DestroyFallingRagdolls( &data );
 
 	return 0;
 }
@@ -130,6 +173,37 @@ static int MultithreadingTest( void )
 	{
 		int result = SingleMultithreadingTest( workerCount, &reference );
 		ENSURE( result == 0 );
+	}
+
+	return 0;
+}
+
+// Fluid that never touches the ragdolls must leave them bit-identical to a world without fluid.
+static int RagdollFluidTest( void )
+{
+	DeterminismResult reference = { 0 };
+	FallingRagdollData plain = RunFallingRagdolls( 1, ragdollFluidNone );
+	ENSURE( EnsureRepeatable( &reference, (DeterminismResult){ .sleepStep = plain.sleepStep, .hash = plain.hash } ) == 0 );
+
+	RagdollFluid modes[2] = { ragdollFluidBelow, ragdollFluidDestroyed };
+	int workerCounts[2] = { 1, 4 };
+	for ( int i = 0; i < 2; ++i )
+	{
+		for ( int j = 0; j < 2; ++j )
+		{
+			FallingRagdollData data = RunFallingRagdolls( workerCounts[j], modes[i] );
+
+			if ( data.sleepStep != RAGDOLL_SLEEP_STEP || data.hash != RAGDOLL_HASH )
+			{
+				printf( "  ragdoll fluid mode=%d workers=%d sleepStep=%d hash=0x%08X\n", (int)modes[i], workerCounts[j],
+						data.sleepStep, data.hash );
+			}
+
+			DeterminismResult result = { .sleepStep = data.sleepStep, .hash = data.hash };
+			ENSURE_GOLDEN( data.sleepStep == RAGDOLL_SLEEP_STEP );
+			ENSURE_GOLDEN( data.hash == RAGDOLL_HASH );
+			ENSURE( EnsureRepeatable( &reference, result ) == 0 );
+		}
 	}
 
 	return 0;
@@ -328,6 +402,65 @@ static int MeshDropTest( void )
 	for ( int i = 0; i < 2; ++i )
 	{
 		int result = SingleMeshDropTest( workerCounts[i], &reference );
+		ENSURE( result == 0 );
+	}
+
+	return 0;
+}
+
+static int SingleFluidPoolTest( int workerCount, DeterminismResult* reference )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = workerCount;
+
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	FluidPoolData data = CreateFluidPool( worldId );
+
+	float timeStep = 1.0f / 60.0f;
+
+	// Fluid drag must put the pool to sleep within the step limit
+	bool done = false;
+	for ( int i = 0; i < 1000 && done == false; ++i )
+	{
+		int subStepCount = 4;
+		b3World_Step( worldId, timeStep, subStepCount );
+		TracyCFrameMark;
+
+		done = UpdateFluidPool( worldId, &data );
+	}
+
+	b3DestroyWorld( worldId );
+
+	if ( data.sleepStep != FLUID_POOL_SLEEP_STEP || data.hash != FLUID_POOL_HASH || data.eventHash != FLUID_POOL_EVENT_HASH )
+	{
+		printf( "  fluid pool workers=%d sleepStep=%d hash=0x%08X eventHash=0x%08X begins=%d ends=%d\n", workerCount,
+				data.sleepStep, data.hash, data.eventHash, data.beginCount, data.endCount );
+	}
+
+	// Every body enters fluid, and some switch volumes
+	ENSURE( done == true );
+	ENSURE( data.beginCount > FLUID_POOL_BODY_COUNT );
+	ENSURE( data.endCount > 0 );
+	ENSURE_GOLDEN( data.sleepStep == FLUID_POOL_SLEEP_STEP );
+	ENSURE_GOLDEN( data.hash == FLUID_POOL_HASH );
+	ENSURE_GOLDEN( data.eventHash == FLUID_POOL_EVENT_HASH );
+	ENSURE( EnsureRepeatable( reference, (DeterminismResult){ .sleepStep = data.sleepStep,
+															  .hash = data.hash,
+															  .eventHash = data.eventHash } ) == 0 );
+
+	DestroyFluidPool( &data );
+
+	return 0;
+}
+
+// Test determinism of the fluid stage: buoyancy, drag, currents, volume switches and fluid events.
+static int FluidPoolTest( void )
+{
+	DeterminismResult reference = { 0 };
+	for ( int workerCount = 1; workerCount < 6; ++workerCount )
+	{
+		int result = SingleFluidPoolTest( workerCount, &reference );
 		ENSURE( result == 0 );
 	}
 
@@ -572,7 +705,8 @@ static int SIMDWidthTest( void )
 	}
 
 	SceneFcn* scenes[] = {
-		SingleMultithreadingTest, SingleWavePileTest, SingleQuerySpawnTest, SingleMeshDropTest, SingleRollingMixTest, SingleMeshMixTest,
+		SingleMultithreadingTest, SingleWavePileTest, SingleQuerySpawnTest, SingleMeshDropTest,
+		SingleFluidPoolTest, SingleRollingMixTest, SingleMeshMixTest,
 	};
 
 	for ( int i = 0; i < ARRAY_COUNT( scenes ); ++i )
@@ -590,6 +724,7 @@ static int SIMDWidthTest( void )
 		ENSURE( narrow.hash == wide.hash );
 		ENSURE( narrow.queryHitCount == wide.queryHitCount );
 		ENSURE( narrow.queryHash == wide.queryHash );
+		ENSURE( narrow.eventHash == wide.eventHash );
 	}
 
 	return 0;
@@ -599,9 +734,11 @@ int DeterminismTest( void )
 {
 	RUN_SUBTEST( MultithreadingTest );
 	RUN_SUBTEST( CrossPlatformTest );
+	RUN_SUBTEST( RagdollFluidTest );
 	RUN_SUBTEST( WavePileTest );
 	RUN_SUBTEST( QuerySpawnTest );
 	RUN_SUBTEST( MeshDropTest );
+	RUN_SUBTEST( FluidPoolTest );
 	RUN_SUBTEST( SIMDWidthTest );
 
 	return 0;

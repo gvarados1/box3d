@@ -396,3 +396,187 @@ void DestroyQuerySpawn( QuerySpawnData* data )
 {
 	(void)data;
 }
+
+// Specific gravity by row, three floaters and two sinkers
+static const float fluidPoolSpecificGravities[FLUID_POOL_GRID] = { 0.35f, 0.6f, 0.85f, 1.6f, 3.0f };
+
+FluidPoolData CreateFluidPool( b3WorldId worldId )
+{
+	FluidPoolData data = { 0 };
+	data.eventHash = B3_HASH_INIT;
+
+	g_randomSeed = 36541;
+
+	// Inside spans x in [-5, 5] and z in [-3, 3] with the floor at y = -3
+	{
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		b3BodyId groundId = b3CreateBody( worldId, &bodyDef );
+		b3ShapeDef shapeDef = b3DefaultShapeDef();
+
+		b3BoxHull floor = b3MakeOffsetBoxHull( 5.5f, 0.5f, 3.5f, (b3Vec3){ 0.0f, -3.5f, 0.0f } );
+		b3CreateHullShape( groundId, &shapeDef, &floor.base );
+
+		for ( int i = 0; i < 2; ++i )
+		{
+			float sign = i == 0 ? -1.0f : 1.0f;
+			b3BoxHull wallX = b3MakeOffsetBoxHull( 0.5f, 2.5f, 3.5f, (b3Vec3){ 5.5f * sign, -1.0f, 0.0f } );
+			b3BoxHull wallZ = b3MakeOffsetBoxHull( 5.5f, 2.5f, 0.5f, (b3Vec3){ 0.0f, -1.0f, 3.5f * sign } );
+			b3CreateHullShape( groundId, &shapeDef, &wallX.base );
+			b3CreateHullShape( groundId, &shapeDef, &wallZ.base );
+		}
+	}
+
+	// The pool reuses the index of a destroyed volume with a new generation
+	b3FluidVolumeDef volumeDef = b3DefaultFluidVolumeDef();
+	b3DestroyFluidVolume( b3CreateFluidVolume( worldId, &volumeDef ) );
+
+	// Strong drag so the scene settles
+	volumeDef.bounds = (b3AABB){ { -5.0f, -3.0f, -3.0f }, { 5.0f, 0.5f, 3.0f } };
+	volumeDef.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 0.0f };
+	volumeDef.linearDrag = 5.0f;
+	volumeDef.angularDrag = 6.0f;
+	data.poolId = b3CreateFluidVolume( worldId, &volumeDef );
+
+	// The higher surface wins where the volumes overlap: floaters ride the current out and drop into
+	// the pool, sinkers fall out of the bottom
+	volumeDef.bounds = (b3AABB){ { -5.0f, -1.5f, -3.0f }, { -1.5f, 1.0f, 3.0f } };
+	volumeDef.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 0.5f };
+	volumeDef.linearDrag = 2.0f;
+	volumeDef.angularDrag = 2.0f;
+	volumeDef.flowVelocity = (b3Vec3){ 1.5f, 0.0f, 0.0f };
+	data.channelId = b3CreateFluidVolume( worldId, &volumeDef );
+
+	b3Sphere sphere = { b3Vec3_zero, 0.3f };
+	b3BoxHull box = b3MakeBoxHull( 0.3f, 0.2f, 0.25f );
+	b3Capsule capsule = { { -0.3f, 0.0f, 0.0f }, { 0.3f, 0.0f, 0.0f }, 0.18f };
+	b3HullData* rock = b3CreateRock( 0.35f );
+	b3BoxHull handle = b3MakeOffsetBoxHull( 0.1f, 0.2f, 0.1f, (b3Vec3){ 0.0f, 0.35f, 0.0f } );
+	b3Sphere head = { { 0.0f, -0.05f, 0.0f }, 0.2f };
+	float dragScales[3] = { 1.0f, 0.75f, 1.5f };
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+
+	// Every shape meets every specific gravity once, and every column holds all shapes and specific gravities
+	for ( int row = 0; row < FLUID_POOL_GRID; ++row )
+	{
+		float specificGravity = fluidPoolSpecificGravities[row];
+
+		for ( int column = 0; column < FLUID_POOL_GRID; ++column )
+		{
+			int index = row * FLUID_POOL_GRID + column;
+
+			b3Vec3 jitter = RandomVec3Uniform( -0.2f, 0.2f );
+			bodyDef.position.x = -4.0f + 2.0f * column + jitter.x;
+			bodyDef.position.y = 1.5f + 0.4f * ( ( column + 2 * row ) % 3 ) + jitter.y;
+			bodyDef.position.z = -2.4f + 1.2f * row + jitter.z;
+			bodyDef.rotation = RandomQuat();
+
+			b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+			data.bodies[index] = bodyId;
+
+			// Odd bodies take their specific gravity from the shape density and keep the default fluid def
+			bool fromDensity = ( index & 1 ) == 1;
+			b3ShapeDef shapeDef = b3DefaultShapeDef();
+			if ( fromDensity )
+			{
+				shapeDef.density *= specificGravity;
+			}
+
+			switch ( ( row + column ) % 5 )
+			{
+				case 0:
+					b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+					break;
+				case 1:
+					b3CreateHullShape( bodyId, &shapeDef, &box.base );
+					break;
+				case 2:
+					b3CreateCapsuleShape( bodyId, &shapeDef, &capsule );
+					break;
+				case 3:
+					b3CreateHullShape( bodyId, &shapeDef, rock );
+					break;
+				default:
+					// Bottom heavy compound
+					b3CreateHullShape( bodyId, &shapeDef, &handle.base );
+					shapeDef.density *= 3.0f;
+					b3CreateSphereShape( bodyId, &shapeDef, &head );
+					break;
+			}
+
+			if ( fromDensity == false )
+			{
+				b3BodyFluidDef fluidDef = b3DefaultBodyFluidDef();
+				fluidDef.displacedVolume = b3Body_GetMass( bodyId ) / ( specificGravity * volumeDef.density );
+				fluidDef.dragScale = dragScales[index % 3];
+				b3Body_SetFluidDef( bodyId, &fluidDef );
+			}
+		}
+	}
+
+	// The world keeps its own copy.
+	b3DestroyHull( rock );
+
+	return data;
+}
+
+static uint32_t HashFluidEvent( uint32_t hash, int stepIndex, b3BodyId bodyId, b3FluidVolumeId volumeId, int kind )
+{
+	int32_t values[6] = { stepIndex, bodyId.index1, bodyId.generation, volumeId.index1, volumeId.generation, kind };
+	return b3Hash( hash, (const uint8_t*)values, sizeof( values ) );
+}
+
+bool UpdateFluidPool( b3WorldId worldId, FluidPoolData* data )
+{
+	// Ends before begins, as a consumer tracking one volume per body reads them
+	b3FluidEvents events = b3World_GetFluidEvents( worldId );
+	for ( int i = 0; i < events.endCount; ++i )
+	{
+		const b3FluidEndTouchEvent* event = events.endEvents + i;
+		data->eventHash = HashFluidEvent( data->eventHash, data->stepCount, event->bodyId, event->volumeId, 0 );
+	}
+
+	for ( int i = 0; i < events.beginCount; ++i )
+	{
+		const b3FluidBeginTouchEvent* event = events.beginEvents + i;
+		data->eventHash = HashFluidEvent( data->eventHash, data->stepCount, event->bodyId, event->volumeId, 1 );
+		data->eventHash = b3Hash( data->eventHash, (const uint8_t*)&event->point, sizeof( b3Pos ) );
+		data->eventHash = b3Hash( data->eventHash, (const uint8_t*)&event->velocity, sizeof( b3Vec3 ) );
+	}
+
+	data->beginCount += events.beginCount;
+	data->endCount += events.endCount;
+
+	if ( data->hash == 0 && b3World_GetAwakeBodyCount( worldId ) == 0 )
+	{
+		data->hash = B3_HASH_INIT;
+		for ( int i = 0; i < FLUID_POOL_BODY_COUNT; ++i )
+		{
+			b3BodyId bodyId = data->bodies[i];
+			b3WorldTransform xf = b3Body_GetTransform( bodyId );
+			b3Vec3 linearVelocity = b3Body_GetLinearVelocity( bodyId );
+			b3Vec3 angularVelocity = b3Body_GetAngularVelocity( bodyId );
+			float fraction = b3Body_GetSubmergedFraction( bodyId );
+			b3FluidVolumeId volumeId = b3Body_GetFluidVolume( bodyId );
+			int32_t volume[2] = { volumeId.index1, volumeId.generation };
+
+			data->hash = b3Hash( data->hash, (uint8_t*)&xf, sizeof( b3WorldTransform ) );
+			data->hash = b3Hash( data->hash, (uint8_t*)&linearVelocity, sizeof( b3Vec3 ) );
+			data->hash = b3Hash( data->hash, (uint8_t*)&angularVelocity, sizeof( b3Vec3 ) );
+			data->hash = b3Hash( data->hash, (uint8_t*)&fraction, sizeof( float ) );
+			data->hash = b3Hash( data->hash, (uint8_t*)volume, sizeof( volume ) );
+		}
+
+		data->sleepStep = data->stepCount;
+	}
+
+	data->stepCount += 1;
+
+	return data->hash != 0;
+}
+
+void DestroyFluidPool( FluidPoolData* data )
+{
+	(void)data;
+}

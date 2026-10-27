@@ -1821,3 +1821,6 @@ B3_API bool b3Contact_IsValid( b3ContactId id );
 B3_API b3ContactData b3Contact_GetData( b3ContactId contactId );
 
 /**@}*/ // contact
+
+// MineMogul fork: fluid volumes (buoyancy, drag, currents).
+#include "fluid.h"

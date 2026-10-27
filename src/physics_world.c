@@ -11,6 +11,7 @@
 #include "contact.h"
 #include "core.h"
 #include "ctz.h"
+#include "fluid.h"
 #include "hull.h"
 #include "island.h"
 #include "joint.h"
@@ -448,6 +449,8 @@ void b3DestroyWorld( b3WorldId worldId )
 	b3Array_Destroy( world->contactEndEvents[1] );
 	b3Array_Destroy( world->contactHitEvents );
 	b3Array_Destroy( world->jointEvents );
+
+	b3DestroyFluidWorld( world );
 
 	int sensorCount = world->sensors.count;
 	for ( int i = 0; i < sensorCount; ++i )
@@ -1143,6 +1146,8 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 		world->profile.collide = b3GetMilliseconds( collideTicks );
 	}
 
+	b3FluidPreSolve( world, &context );
+
 	// Integrate velocities, solve velocity constraints, and integrate positions.
 	if ( timeStep > 0.0f )
 	{
@@ -1150,6 +1155,8 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 		b3Solve( world, &context );
 		world->profile.solve = b3GetMilliseconds( solveTicks );
 	}
+
+	b3FluidPostSolve( world );
 
 	// Finish the tree task in case b3Solve didn't finish it
 	if ( world->userTreeTask )
@@ -1181,6 +1188,7 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 	world->endEventArrayIndex = 1 - world->endEventArrayIndex;
 	b3Array_Clear( world->sensorEndEvents[world->endEventArrayIndex] );
 	b3Array_Clear( world->contactEndEvents[world->endEventArrayIndex] );
+	b3FluidSwapEvents( world );
 	world->locked = false;
 
 	if ( world->recording != NULL )
@@ -2601,6 +2609,15 @@ static uint64_t b3GetWorldByteCount( b3World* world, bool log )
 	if ( log )
 	{
 		b3Log( "debug draw: %d", debugBytes );
+	}
+
+	// MineMogul fork
+	int fluidBytes = b3GetFluidByteCount( world );
+	total += fluidBytes;
+
+	if ( log )
+	{
+		b3Log( "fluid: %d", fluidBytes );
 	}
 
 	// stack allocator

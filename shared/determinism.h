@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include "box3d/fluid.h"
 #include "box3d/id.h"
 
 #include "human.h"
@@ -84,6 +85,29 @@ typedef struct QuerySpawnData
 QuerySpawnData CreateQuerySpawn( b3WorldId worldId );
 bool UpdateQuerySpawn( b3WorldId worldId, QuerySpawnData* data );
 void DestroyQuerySpawn( QuerySpawnData* data );
+
+// Mixed shapes and specific gravities dropped into a walled pool. A higher volume with a current
+// overlaps one end, so bodies switch volumes as they drift out of it or sink below it. Hashes the
+// settled state and the ordered fluid event stream.
+#define FLUID_POOL_GRID 5
+#define FLUID_POOL_BODY_COUNT ( FLUID_POOL_GRID * FLUID_POOL_GRID )
+
+typedef struct FluidPoolData
+{
+	b3BodyId bodies[FLUID_POOL_BODY_COUNT];
+	b3FluidVolumeId poolId;
+	b3FluidVolumeId channelId;
+	int beginCount;
+	int endCount;
+	uint32_t eventHash;
+	int stepCount;
+	int sleepStep;
+	uint32_t hash;
+} FluidPoolData;
+
+FluidPoolData CreateFluidPool( b3WorldId worldId );
+bool UpdateFluidPool( b3WorldId worldId, FluidPoolData* data );
+void DestroyFluidPool( FluidPoolData* data );
 
 #ifdef __cplusplus
 }

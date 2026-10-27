@@ -247,6 +247,9 @@ typedef struct b3World
 	// MineMogul fork: which broad-phase trees sensors query, one bit per body type (b3World_SetSensorTreeMask).
 	uint32_t sensorTreeMask;
 
+	// MineMogul fork: fluid volumes and per-body fluid state (fluid.c). NULL until the first fluid mutator.
+	struct b3FluidWorld* fluid;
+
 	b3FrictionCallback* frictionCallback;
 	b3RestitutionCallback* restitutionCallback;
 

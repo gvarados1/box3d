@@ -6,6 +6,7 @@
 #include "container.h"
 #include "core.h"
 
+#include "box3d/fluid.h"
 #include "box3d/id.h"
 #include "box3d/math_functions.h"
 #include "box3d/types.h"
@@ -196,6 +197,10 @@ typedef b3RevoluteJointDef b3RecCType_REVOLUTEJOINTDEF;
 typedef b3SphericalJointDef b3RecCType_SPHERICALJOINTDEF;
 typedef b3WeldJointDef b3RecCType_WELDJOINTDEF;
 typedef b3WheelJointDef b3RecCType_WHEELJOINTDEF;
+typedef b3Plane b3RecCType_PLANE;
+typedef b3FluidVolumeId b3RecCType_FLUIDVOLUMEID;
+typedef b3FluidVolumeDef b3RecCType_FLUIDVOLUMEDEF;
+typedef b3BodyFluidDef b3RecCType_BODYFLUIDDEF;
 
 // Codegen pass 1a: arg structs. Generated here so call sites (body.c, shape.c, etc.) can see them.
 #define ARG( TAG, field ) b3RecCType_##TAG field;
@@ -266,6 +271,10 @@ void b3RecW_REVOLUTEJOINTDEF( b3RecBuffer* buf, b3RevoluteJointDef v );
 void b3RecW_SPHERICALJOINTDEF( b3RecBuffer* buf, b3SphericalJointDef v );
 void b3RecW_WELDJOINTDEF( b3RecBuffer* buf, b3WeldJointDef v );
 void b3RecW_WHEELJOINTDEF( b3RecBuffer* buf, b3WheelJointDef v );
+void b3RecW_PLANE( b3RecBuffer* buf, b3Plane v );
+void b3RecW_FLUIDVOLUMEID( b3RecBuffer* buf, b3FluidVolumeId v );
+void b3RecW_FLUIDVOLUMEDEF( b3RecBuffer* buf, b3FluidVolumeDef v );
+void b3RecW_BODYFLUIDDEF( b3RecBuffer* buf, b3BodyFluidDef v );
 
 // Record framing
 void b3RecBeginRecord( b3Recording* rec, uint8_t opcode );
@@ -283,6 +292,8 @@ void b3RecEndRecord( b3Recording* rec );
 #define B3_REC_RETDECL_RET_BODYID( Name ) void b3RecWriteRet_##Name( b3Recording* rec, const b3RecArgs_##Name* a, b3BodyId id );
 #define B3_REC_RETDECL_RET_SHAPEID( Name ) void b3RecWriteRet_##Name( b3Recording* rec, const b3RecArgs_##Name* a, b3ShapeId id );
 #define B3_REC_RETDECL_RET_JOINTID( Name ) void b3RecWriteRet_##Name( b3Recording* rec, const b3RecArgs_##Name* a, b3JointId id );
+#define B3_REC_RETDECL_RET_FLUIDVOLUMEID( Name )                                                                                 \
+	void b3RecWriteRet_##Name( b3Recording* rec, const b3RecArgs_##Name* a, b3FluidVolumeId id );
 #define B3_REC_OP( op, Name, RET, ... ) B3_REC_RETDECL_##RET( Name )
 #include "recording_ops.inl"
 #undef B3_REC_OP
@@ -290,6 +301,7 @@ void b3RecEndRecord( b3Recording* rec );
 #undef B3_REC_RETDECL_RET_BODYID
 #undef B3_REC_RETDECL_RET_SHAPEID
 #undef B3_REC_RETDECL_RET_JOINTID
+#undef B3_REC_RETDECL_RET_FLUIDVOLUMEID
 
 // Record a void op. The branch is free when recording is off.
 #define B3_REC( world, Name, ... )                                                                                               \

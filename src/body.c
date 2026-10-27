@@ -6,6 +6,7 @@
 #include "aabb.h"
 #include "contact.h"
 #include "core.h"
+#include "fluid.h"
 #include "id_pool.h"
 #include "island.h"
 #include "joint.h"
@@ -448,6 +449,8 @@ void b3DestroyBody( b3BodyId bodyId )
 		// Remove solver set if it's now an orphan.
 		b3DestroySolverSet( world, set->setIndex );
 	}
+
+	b3FluidDestroyBody( world, body->id );
 
 	// Free body and id (preserve body revision)
 	b3FreeId( &world->bodyIdPool, body->id );
@@ -1627,6 +1630,8 @@ void b3Body_SetType( b3BodyId bodyId, b3BodyType type )
 		}
 	}
 
+	b3FluidSetBodyType( world, body->id, type );
+
 	// Stage 1: skip disabled bodies
 	if ( body->setIndex == b3_disabledSet )
 	{
@@ -2225,6 +2230,8 @@ void b3Body_Disable( b3BodyId bodyId )
 		world->locked = false;
 		return;
 	}
+
+	b3FluidRemoveBody( world, body->id );
 
 	// Destroy contacts and wake bodies touching this body. This avoid floating bodies.
 	// This is necessary even for static bodies.

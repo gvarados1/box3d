@@ -15,6 +15,7 @@
 #include "contact.h"
 #include "container.h"
 #include "core.h"
+#include "fluid.h"
 #include "id_pool.h"
 #include "island.h"
 #include "joint.h"
@@ -37,6 +38,9 @@
 
 #define B3_SNAP_FLAG_VALIDATION 0x1u
 #define B3_SNAP_FLAG_DOUBLE_PRECISION 0x2u
+
+// MineMogul fork: a fluid section follows the names. The high bit stays clear of upstream's next flags.
+#define B3_SNAP_FLAG_FORK_FLUID 0x80000000u
 
 // Layout hash over all POD-copied structs + key constants.
 // Changing a struct size updates this, catching ABI drift early.
@@ -962,6 +966,88 @@ static void b3DesContacts( b3SnapReader* r, b3World* world )
 	}
 }
 
+// Fluid world: struct sizes for a self check, the volume id pool, the sparse volume array and the body
+// side table. Events, stats and the per-worker scratch are empty between steps and start empty on restore.
+static void b3SerFluid( b3RecBuffer* buf, const b3FluidWorld* fluid )
+{
+	b3SnapW_U32( buf, (uint32_t)sizeof( b3FluidVolume ) );
+	b3SnapW_U32( buf, (uint32_t)sizeof( b3FluidBody ) );
+
+	b3SerIdPool( buf, &fluid->volumeIdPool );
+
+	// userData is host wiring, zero it on the copy
+	int volumeCount = fluid->volumes.count;
+	b3SnapW_I32( buf, volumeCount );
+	for ( int i = 0; i < volumeCount; ++i )
+	{
+		b3FluidVolume elem = fluid->volumes.data[i];
+		elem.userData = NULL;
+		b3SnapW_Bytes( buf, &elem, sizeof( b3FluidVolume ) );
+	}
+
+	b3SerPodArray( buf, fluid->bodies );
+}
+
+// Rebuilds the fluid world that b3FreeLiveSimElements tore down. A failed read leaves no fluid world.
+static void b3DesFluid( b3SnapReader* r, b3World* world )
+{
+	uint32_t volumeSize = b3SnapR_U32( r );
+	uint32_t bodySize = b3SnapR_U32( r );
+	if ( r->ok && ( volumeSize != sizeof( b3FluidVolume ) || bodySize != sizeof( b3FluidBody ) ) )
+	{
+		printf( "b3DeserializeIntoShell: fluid layout mismatch\n" );
+		r->ok = false;
+	}
+
+	if ( r->ok == false )
+	{
+		return;
+	}
+
+	b3FluidWorld* fluid = b3GetOrCreateFluidWorld( world );
+	b3DesIdPool( r, &fluid->volumeIdPool );
+
+	int volumeCount = b3SnapR_I32( r );
+	if ( r->ok && b3SnapCheckCount( r, volumeCount, (int)sizeof( b3FluidVolume ), (int)sizeof( b3FluidVolume ) ) == false )
+	{
+		r->ok = false;
+	}
+
+	if ( r->ok )
+	{
+		b3Array_Resize( fluid->volumes, volumeCount );
+		for ( int i = 0; i < volumeCount; ++i )
+		{
+			b3FluidVolume* volume = fluid->volumes.data + i;
+			b3SnapR_Bytes( r, volume, sizeof( b3FluidVolume ) );
+			volume->userData = NULL;
+		}
+	}
+
+	// Later growth zero fills past the restored count
+	b3DesPodArray( r, fluid->bodies );
+
+	// The ids name the world the snapshot came from
+	for ( int i = 0; r->ok && i < fluid->bodies.count; ++i )
+	{
+		b3FluidBody* entry = fluid->bodies.data + i;
+		if ( B3_IS_NON_NULL( entry->volumeId ) )
+		{
+			entry->volumeId.world0 = world->worldId;
+		}
+	}
+
+	if ( r->ok )
+	{
+		b3RebuildFluidLookup( fluid );
+	}
+
+	if ( r->ok == false )
+	{
+		b3DestroyFluidWorld( world );
+	}
+}
+
 // Free per-object heap that b3DeserializeIntoShell will overwrite,
 // so restoring over a populated world doesn't leak.
 static void b3FreeLiveSimElements( b3World* world )
@@ -1027,6 +1113,9 @@ static void b3FreeLiveSimElements( b3World* world )
 		b3Array_Destroy( island->contacts );
 		b3Array_Destroy( island->joints );
 	}
+
+	// The fluid world is rebuilt only when the image carries it, so a rewind before it leaves none
+	b3DestroyFluidWorld( world );
 }
 
 int b3SerializeWorld( b3World* world, b3RecBuffer* buf, b3Recording* rec )
@@ -1042,6 +1131,10 @@ int b3SerializeWorld( b3World* world, b3RecBuffer* buf, b3Recording* rec )
 #if defined( BOX3D_DOUBLE_PRECISION )
 	hdr.flags |= B3_SNAP_FLAG_DOUBLE_PRECISION;
 #endif
+	if ( world->fluid != NULL )
+	{
+		hdr.flags |= B3_SNAP_FLAG_FORK_FLUID;
+	}
 	b3SnapW_Bytes( buf, &hdr, (int)sizeof( hdr ) );
 
 	// World scalars
@@ -1142,6 +1235,11 @@ int b3SerializeWorld( b3World* world, b3RecBuffer* buf, b3Recording* rec )
 	}
 
 	b3SerNames( buf, &world->names );
+
+	if ( world->fluid != NULL )
+	{
+		b3SerFluid( buf, world->fluid );
+	}
 
 	return buf->size - startSize;
 }
@@ -1377,6 +1475,11 @@ bool b3DeserializeIntoShell( const uint8_t* data, int size, b3World* world, b3Re
 	}
 
 	b3DesNames( r, &world->names );
+
+	if ( r->ok && ( hdr.flags & B3_SNAP_FLAG_FORK_FLUID ) )
+	{
+		b3DesFluid( r, world );
+	}
 
 	return r->ok;
 }

@@ -649,6 +649,46 @@ b3WheelJointDef b3RecR_WHEELJOINTDEF( b3RecReader* rdr )
 	return def;
 }
 
+b3Plane b3RecR_PLANE( b3RecReader* rdr )
+{
+	b3Plane plane;
+	plane.normal = b3RecR_VEC3( rdr );
+	plane.offset = b3RecR_F32( rdr );
+	return plane;
+}
+
+b3FluidVolumeId b3RecR_FLUIDVOLUMEID( b3RecReader* rdr )
+{
+	uint64_t x = b3RecR_U64( rdr );
+	b3FluidVolumeId id = { (int32_t)( x >> 32 ), (uint16_t)( x >> 16 ), (uint16_t)( x ) };
+	return id;
+}
+
+b3FluidVolumeDef b3RecR_FLUIDVOLUMEDEF( b3RecReader* rdr )
+{
+	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
+	def.bounds = b3RecR_AABB( rdr );
+	def.surface = b3RecR_PLANE( rdr );
+	def.density = b3RecR_F32( rdr );
+	def.linearDrag = b3RecR_F32( rdr );
+	def.angularDrag = b3RecR_F32( rdr );
+	def.quadraticDrag = b3RecR_F32( rdr );
+	def.flowVelocity = b3RecR_VEC3( rdr );
+	def.maskBits = b3RecR_U64( rdr );
+	(void)b3RecR_U64( rdr ); // userData placeholder
+	def.userData = NULL;
+	return def;
+}
+
+b3BodyFluidDef b3RecR_BODYFLUIDDEF( b3RecReader* rdr )
+{
+	b3BodyFluidDef def = b3DefaultBodyFluidDef();
+	def.displacedVolume = b3RecR_F32( rdr );
+	def.dragScale = b3RecR_F32( rdr );
+	def.enabled = b3RecR_BOOL( rdr );
+	return def;
+}
+
 // Outliner body tracking. Defined after the player struct; forward declared here because the
 // create/destroy dispatch sits above that struct.
 static void b3RecTrackBodyCreate( b3RecPlayer* player, b3BodyId id );
@@ -683,6 +723,15 @@ static b3JointId b3RecMakeJointId( b3RecReader* rdr, b3JointId recorded )
 	return id;
 }
 
+static b3FluidVolumeId b3RecMakeFluidVolumeId( b3RecReader* rdr, b3FluidVolumeId recorded )
+{
+	b3FluidVolumeId id;
+	id.index1 = recorded.index1;
+	id.world0 = (uint16_t)( rdr->replayWorldId.index1 - 1u );
+	id.generation = recorded.generation;
+	return id;
+}
+
 // A create op appends the returned id after args. index1 and generation must match;
 // world0 always differs so we ignore it.
 static void b3RecCheckId( b3RecReader* rdr, const char* kind, int gotIndex, unsigned gotGen, int recIndex, unsigned recGen )
@@ -708,6 +757,11 @@ static void b3RecCheckShapeId( b3RecReader* rdr, b3ShapeId got, b3ShapeId rec )
 static void b3RecCheckJointId( b3RecReader* rdr, b3JointId got, b3JointId rec )
 {
 	b3RecCheckId( rdr, "joint", got.index1, got.generation, rec.index1, rec.generation );
+}
+
+static void b3RecCheckFluidVolumeId( b3RecReader* rdr, b3FluidVolumeId got, b3FluidVolumeId rec )
+{
+	b3RecCheckId( rdr, "fluid volume", got.index1, got.generation, rec.index1, rec.generation );
 }
 
 b3RegistrySlot* b3RecGetSlot( b3RecReader* rdr, uint32_t id, b3GeometryKind kind )
@@ -1686,6 +1740,48 @@ static void b3RecDispatch_RecordingBounds( const b3RecArgs_RecordingBounds* a, b
 	{
 		rdr->owner->bounds = a->bounds;
 	}
+}
+
+static void b3RecDispatch_CreateFluidVolume( const b3RecArgs_CreateFluidVolume* a, b3RecReader* rdr )
+{
+	b3FluidVolumeId recId = b3RecR_FLUIDVOLUMEID( rdr );
+	b3FluidVolumeId gotId = b3CreateFluidVolume( rdr->replayWorldId, &a->def );
+	b3RecCheckFluidVolumeId( rdr, gotId, recId );
+}
+
+static void b3RecDispatch_DestroyFluidVolume( const b3RecArgs_DestroyFluidVolume* a, b3RecReader* rdr )
+{
+	b3DestroyFluidVolume( b3RecMakeFluidVolumeId( rdr, a->volume ) );
+}
+
+static void b3RecDispatch_FluidVolumeSetSurface( const b3RecArgs_FluidVolumeSetSurface* a, b3RecReader* rdr )
+{
+	b3FluidVolume_SetSurface( b3RecMakeFluidVolumeId( rdr, a->volume ), a->surface );
+}
+
+static void b3RecDispatch_FluidVolumeSetBounds( const b3RecArgs_FluidVolumeSetBounds* a, b3RecReader* rdr )
+{
+	b3FluidVolume_SetBounds( b3RecMakeFluidVolumeId( rdr, a->volume ), a->bounds );
+}
+
+static void b3RecDispatch_FluidVolumeSetFlowVelocity( const b3RecArgs_FluidVolumeSetFlowVelocity* a, b3RecReader* rdr )
+{
+	b3FluidVolume_SetFlowVelocity( b3RecMakeFluidVolumeId( rdr, a->volume ), a->flowVelocity );
+}
+
+static void b3RecDispatch_FluidVolumeSetDrag( const b3RecArgs_FluidVolumeSetDrag* a, b3RecReader* rdr )
+{
+	b3FluidVolume_SetDrag( b3RecMakeFluidVolumeId( rdr, a->volume ), a->linearDrag, a->angularDrag, a->quadraticDrag );
+}
+
+static void b3RecDispatch_FluidVolumeSetDensity( const b3RecArgs_FluidVolumeSetDensity* a, b3RecReader* rdr )
+{
+	b3FluidVolume_SetDensity( b3RecMakeFluidVolumeId( rdr, a->volume ), a->density );
+}
+
+static void b3RecDispatch_BodySetFluidDef( const b3RecArgs_BodySetFluidDef* a, b3RecReader* rdr )
+{
+	b3Body_SetFluidDef( b3RecMakeBodyId( rdr, a->body ), &a->def );
 }
 
 // Spatial query replay. The recorded inputs come through the manifest; here the variable-length hit

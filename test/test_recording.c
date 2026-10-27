@@ -1144,6 +1144,19 @@ static float ReplaySafetyFactor( b3RecPlayer* player, const char* name )
 	return -1.0f;
 }
 
+// Retarget a recorded id at another world, as the player does
+static b3BodyId ToWorldBodyId( b3BodyId bodyId, b3WorldId worldId )
+{
+	bodyId.world0 = (uint16_t)( worldId.index1 - 1 );
+	return bodyId;
+}
+
+static b3FluidVolumeId ToWorldVolumeId( b3FluidVolumeId volumeId, b3WorldId worldId )
+{
+	volumeId.world0 = (uint16_t)( worldId.index1 - 1 );
+	return volumeId;
+}
+
 // Exercise every recorded op in a single session, then validate replay at two worker
 // counts, round-trip through a file, and drive the incremental player.
 static int AllOps( void )
@@ -1599,6 +1612,37 @@ static int AllOps( void )
 		b3CreateHullShape( rodId, &rodShapeDef, &rod.base );
 	}
 
+	// Fluid: a pool the dynamic row starts in, every volume mutator, a throwaway volume, and both def
+	// setters with a stale id in the array form. The pool density suits the unit shape densities above.
+	b3FluidVolumeDef poolDef = b3DefaultFluidVolumeDef();
+	poolDef.bounds = (b3AABB){ { -15.0f, -1.0f, -5.0f }, { 15.0f, 6.0f, 5.0f } };
+	poolDef.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 5.0f };
+	poolDef.density = 1.5f;
+	b3FluidVolumeId poolId = b3CreateFluidVolume( worldId, &poolDef );
+	ENSURE( b3FluidVolume_IsValid( poolId ) );
+	b3FluidVolume_SetSurface( poolId, (b3Plane){ { 0.0f, 1.0f, 0.0f }, 5.2f } );
+	b3FluidVolume_SetBounds( poolId, (b3AABB){ { -16.0f, -1.0f, -5.0f }, { 16.0f, 6.0f, 5.0f } } );
+	b3FluidVolume_SetFlowVelocity( poolId, (b3Vec3){ 0.2f, 0.0f, 0.0f } );
+	b3FluidVolume_SetDrag( poolId, 2.0f, 1.0f, 0.5f );
+	b3FluidVolume_SetDensity( poolId, 1.6f );
+
+	b3FluidVolumeId tmpVolumeId = b3CreateFluidVolume( worldId, &poolDef );
+	ENSURE( b3FluidVolume_IsValid( tmpVolumeId ) );
+	b3DestroyFluidVolume( tmpVolumeId );
+
+	b3BodyFluidDef hullFluidDef = b3DefaultBodyFluidDef();
+	hullFluidDef.displacedVolume = 0.5f;
+	hullFluidDef.dragScale = 1.25f;
+	b3Body_SetFluidDef( hullBodyId, &hullFluidDef );
+
+	b3BodyId staleBodyId = boxBodyId;
+	staleBodyId.generation += 1;
+	b3BodyId fluidBodyIds[3] = { capsuleBodyId, staleBodyId, boxBodyId };
+	b3BodyFluidDef fluidDefs[3] = { b3DefaultBodyFluidDef(), b3DefaultBodyFluidDef(), b3DefaultBodyFluidDef() };
+	fluidDefs[0].dragScale = 2.0f;
+	fluidDefs[2].enabled = false;
+	b3World_SetBodyFluidDefs( worldId, fluidBodyIds, fluidDefs, 3 );
+
 	b3ExplosionDef explosion = b3DefaultExplosionDef();
 	explosion.position = (b3Pos){ 0.0f, 5.0f, 0.0f };
 	explosion.radius = 3.0f;
@@ -1632,6 +1676,7 @@ static int AllOps( void )
 			b3Body_ApplyLinearImpulseToCenter( capsuleBodyId, (b3Vec3){ 2.0f, 0.0f, 0.0f }, true );
 			b3Body_SetGravityScale( bodyId, 1.0f );
 			b3Body_SetSafetyFactor( fastId, 0.4f );
+			b3FluidVolume_SetDensity( poolId, 1.4f );
 		}
 
 		// Issue queries mid-loop to exercise recording across steps
@@ -1760,6 +1805,15 @@ static int AllOps( void )
 		{
 		}
 		ENSURE( ReplaySafetyFactor( player, "fastBody" ) == 0.4f );
+
+		// Fluid values written by the volume and def ops are restored too
+		b3WorldId replayWorldId = b3RecPlayer_GetWorldId( player );
+		b3FluidVolumeDef replayPoolDef = b3FluidVolume_GetDef( ToWorldVolumeId( poolId, replayWorldId ) );
+		ENSURE( replayPoolDef.surface.offset == 5.2f && replayPoolDef.density == 1.4f && replayPoolDef.quadraticDrag == 0.5f );
+		ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( tmpVolumeId, replayWorldId ) ) == false );
+		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( hullBodyId, replayWorldId ) ).displacedVolume == 0.5f );
+		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( capsuleBodyId, replayWorldId ) ).dragScale == 2.0f );
+		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( boxBodyId, replayWorldId ) ).enabled == false );
 
 		b3DestroyPlayer( player );
 	}
@@ -2386,6 +2440,1012 @@ static int GeometryMutatorReplay( void )
 	return 0;
 }
 
+#define FLUID_BODY_COUNT 4
+
+// Water over a slab whose top is at y = 0
+static b3FluidVolumeDef FluidPoolDef( void )
+{
+	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
+	def.bounds = (b3AABB){ { -10.0f, -1.0f, -10.0f }, { 10.0f, 6.0f, 10.0f } };
+	def.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.0f };
+	return def;
+}
+
+// Floaters of each buoyant shape kind and a sinker, dropped from above the pool
+static void CreateFluidScene( b3WorldId worldId, b3BodyId* bodyIds )
+{
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.type = b3_staticBody;
+	groundDef.position = (b3Pos){ 0.0f, -1.0f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3BoxHull groundBox = b3MakeBoxHull( 20.0f, 1.0f, 20.0f );
+	b3ShapeDef groundShapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( groundId, &groundShapeDef, &groundBox.base );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+
+	bodyDef.position = (b3Pos){ -3.0f, 4.0f, 0.0f };
+	bodyIds[0] = b3CreateBody( worldId, &bodyDef );
+	shapeDef.density = 500.0f;
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.4f };
+	b3CreateSphereShape( bodyIds[0], &shapeDef, &sphere );
+
+	bodyDef.position = (b3Pos){ -1.0f, 4.5f, 0.0f };
+	bodyDef.rotation = b3MakeQuatFromAxisAngle( (b3Vec3){ 0.0f, 0.0f, 1.0f }, 0.3f );
+	bodyIds[1] = b3CreateBody( worldId, &bodyDef );
+	shapeDef.density = 600.0f;
+	b3BoxHull box = b3MakeBoxHull( 0.3f, 0.3f, 0.3f );
+	b3CreateHullShape( bodyIds[1], &shapeDef, &box.base );
+
+	bodyDef.position = (b3Pos){ 1.0f, 5.0f, 0.0f };
+	bodyDef.rotation = b3Quat_identity;
+	bodyIds[2] = b3CreateBody( worldId, &bodyDef );
+	shapeDef.density = 400.0f;
+	b3Capsule capsule = { { -0.4f, 0.0f, 0.0f }, { 0.4f, 0.0f, 0.0f }, 0.2f };
+	b3CreateCapsuleShape( bodyIds[2], &shapeDef, &capsule );
+
+	bodyDef.position = (b3Pos){ 3.0f, 4.0f, 0.0f };
+	bodyIds[3] = b3CreateBody( worldId, &bodyDef );
+	shapeDef.density = 3000.0f;
+	b3Sphere sinker = { { 0.0f, 0.0f, 0.0f }, 0.3f };
+	b3CreateSphereShape( bodyIds[3], &shapeDef, &sinker );
+}
+
+static uint64_t HashBytes( uint64_t hash, const void* data, int size )
+{
+	const uint8_t* bytes = (const uint8_t*)data;
+	for ( int i = 0; i < size; ++i )
+	{
+		hash = ( hash ^ bytes[i] ) * B3_SNAP_FNV_PRIME;
+	}
+	return hash;
+}
+
+static uint64_t HashId( uint64_t hash, int index1, int generation )
+{
+	int values[2] = { index1, generation };
+	return HashBytes( hash, values, (int)sizeof( values ) );
+}
+
+// Full id with world0 relative to the hashed world, so a replay in another slot matches
+static uint64_t HashFullId( uint64_t hash, int index1, int world0, int generation, b3WorldId worldId )
+{
+	int values[3] = { index1, index1 != 0 ? world0 - ( worldId.index1 - 1 ) : world0, generation };
+	return HashBytes( hash, values, (int)sizeof( values ) );
+}
+
+// The last step's fluid events and the bodies' fluid state
+static uint64_t HashFluidState( b3WorldId worldId, const b3BodyId* bodyIds, int bodyCount )
+{
+	uint64_t hash = B3_SNAP_FNV_INIT;
+
+	b3FluidEvents events = b3World_GetFluidEvents( worldId );
+	hash = HashId( hash, events.beginCount, events.endCount );
+	for ( int i = 0; i < events.beginCount; ++i )
+	{
+		const b3FluidBeginTouchEvent* event = events.beginEvents + i;
+		hash = HashFullId( hash, event->bodyId.index1, event->bodyId.world0, event->bodyId.generation, worldId );
+		hash = HashFullId( hash, event->volumeId.index1, event->volumeId.world0, event->volumeId.generation, worldId );
+		hash = HashBytes( hash, &event->point, (int)sizeof( b3Pos ) );
+		hash = HashBytes( hash, &event->velocity, (int)sizeof( b3Vec3 ) );
+	}
+
+	for ( int i = 0; i < events.endCount; ++i )
+	{
+		const b3FluidEndTouchEvent* event = events.endEvents + i;
+		hash = HashFullId( hash, event->bodyId.index1, event->bodyId.world0, event->bodyId.generation, worldId );
+		hash = HashFullId( hash, event->volumeId.index1, event->volumeId.world0, event->volumeId.generation, worldId );
+	}
+
+	for ( int i = 0; i < bodyCount; ++i )
+	{
+		b3BodyId bodyId = ToWorldBodyId( bodyIds[i], worldId );
+		b3FluidVolumeId volumeId = b3Body_GetFluidVolume( bodyId );
+		float fraction = b3Body_GetSubmergedFraction( bodyId );
+		hash = HashFullId( hash, volumeId.index1, volumeId.world0, volumeId.generation, worldId );
+		hash = HashBytes( hash, &fraction, (int)sizeof( float ) );
+	}
+
+	return hash;
+}
+
+// Bit i for each end event of the last step that names bodyIds[i], bit bodyCount for any other body
+static int GetFluidEndMask( b3WorldId worldId, const b3BodyId* bodyIds, int bodyCount )
+{
+	b3FluidEvents events = b3World_GetFluidEvents( worldId );
+	int mask = 0;
+	for ( int i = 0; i < events.endCount; ++i )
+	{
+		int bit = 1 << bodyCount;
+		for ( int j = 0; j < bodyCount; ++j )
+		{
+			if ( B3_ID_EQUALS( events.endEvents[i].bodyId, ToWorldBodyId( bodyIds[j], worldId ) ) )
+			{
+				bit = 1 << j;
+			}
+		}
+		mask |= bit;
+	}
+	return mask;
+}
+
+// Defs are set and a volume is created and destroyed before recording, so the seed snapshot carries
+// the side table and a used volume slot. The pool created during recording must reuse that slot with
+// the next generation. Replays at 1 and 4 workers, compares every frame's state and fluid events,
+// restarts, and seeks backward across a volume create.
+static int FluidRoundTrip( void )
+{
+	enum
+	{
+		frameCount = 90,
+		createFrame = 70,
+		destroyFrame = 80,
+	};
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = 1;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyId bodyIds[FLUID_BODY_COUNT];
+	CreateFluidScene( worldId, bodyIds );
+
+	b3BodyFluidDef boxFluidDef = b3DefaultBodyFluidDef();
+	boxFluidDef.displacedVolume = 0.18f;
+	boxFluidDef.dragScale = 1.5f;
+	b3Body_SetFluidDef( bodyIds[1], &boxFluidDef );
+
+	b3FluidVolumeDef poolDef = FluidPoolDef();
+	b3FluidVolumeId oldPoolId = b3CreateFluidVolume( worldId, &poolDef );
+
+	float timeStep = 1.0f / 60.0f;
+	int subStepCount = 4;
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, timeStep, subStepCount );
+	}
+
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( bodyIds[0] ), oldPoolId ) );
+	b3DestroyFluidVolume( oldPoolId );
+
+	for ( int i = 0; i < 2; ++i )
+	{
+		b3World_Step( worldId, timeStep, subStepCount );
+	}
+
+	b3Recording* rec = b3CreateRecording( 0 );
+	ENSURE( rec != NULL );
+	b3World_StartRecording( worldId, rec );
+
+	b3FluidVolumeId poolId = b3CreateFluidVolume( worldId, &poolDef );
+	ENSURE( poolId.index1 == oldPoolId.index1 && poolId.generation != oldPoolId.generation );
+
+	// Higher water over the sinker's side, so the sinker switches volumes and back
+	b3FluidVolumeDef sideDef = FluidPoolDef();
+	sideDef.bounds = (b3AABB){ { 2.0f, -1.0f, -2.0f }, { 6.0f, 6.0f, 2.0f } };
+	sideDef.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.6f };
+	sideDef.density = 1100.0f;
+	b3FluidVolumeId sideId = b3_nullFluidVolumeId;
+
+	b3BodyId staleId = bodyIds[3];
+	staleId.generation += 1;
+
+	uint64_t stateHashes[frameCount + 1] = { 0 };
+	uint64_t fluidHashes[frameCount + 1] = { 0 };
+	int beginCount = 0;
+	int endCount = 0;
+
+	for ( int i = 1; i <= frameCount; ++i )
+	{
+		if ( i == 30 )
+		{
+			b3FluidVolume_SetDensity( poolId, 1200.0f );
+		}
+		else if ( i == 40 )
+		{
+			b3FluidVolume_SetFlowVelocity( poolId, (b3Vec3){ 0.5f, 0.0f, 0.0f } );
+			b3FluidVolume_SetDrag( poolId, 2.0f, 2.0f, 0.5f );
+		}
+		else if ( i == 50 )
+		{
+			b3FluidVolume_SetSurface( poolId, (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.3f } );
+			b3FluidVolume_SetBounds( poolId, (b3AABB){ { -12.0f, -1.0f, -12.0f }, { 12.0f, 6.0f, 12.0f } } );
+		}
+		else if ( i == 55 )
+		{
+			b3BodyId ids[3] = { bodyIds[0], staleId, bodyIds[3] };
+			b3BodyFluidDef defs[3] = { b3DefaultBodyFluidDef(), b3DefaultBodyFluidDef(), b3DefaultBodyFluidDef() };
+			defs[0].displacedVolume = 0.2f;
+			defs[2].dragScale = 0.5f;
+			b3World_SetBodyFluidDefs( worldId, ids, defs, 3 );
+		}
+		else if ( i == 60 )
+		{
+			b3BodyFluidDef def = b3DefaultBodyFluidDef();
+			def.enabled = false;
+			b3Body_SetFluidDef( bodyIds[2], &def );
+		}
+		else if ( i == createFrame )
+		{
+			sideId = b3CreateFluidVolume( worldId, &sideDef );
+		}
+		else if ( i == destroyFrame )
+		{
+			b3DestroyFluidVolume( sideId );
+		}
+
+		b3World_Step( worldId, timeStep, subStepCount );
+
+		stateHashes[i] = b3HashWorldState( b3GetWorldFromId( worldId ) );
+		fluidHashes[i] = HashFluidState( worldId, bodyIds, FLUID_BODY_COUNT );
+
+		b3FluidEvents events = b3World_GetFluidEvents( worldId );
+		beginCount += events.beginCount;
+		endCount += events.endCount;
+	}
+
+	b3World_StopRecording( worldId );
+	b3DestroyWorld( worldId );
+
+	// Without events the fluid hash comparisons below would be vacuous
+	ENSURE( beginCount > 0 && endCount > 0 );
+
+	const uint8_t* data = b3Recording_GetData( rec );
+	int size = b3Recording_GetSize( rec );
+
+	ENSURE( b3ValidateReplay( data, size, 1 ) );
+	ENSURE( b3ValidateReplay( data, size, 4 ) );
+
+	b3RecPlayer* player = b3CreatePlayer( data, size, 4 );
+	ENSURE( player != NULL );
+	b3RecPlayer_SetKeyframePolicy( player, b3RecPlayer_GetKeyframeBudget( player ), 4 );
+	b3WorldId replayId = b3RecPlayer_GetWorldId( player );
+
+	for ( int pass = 0; pass < 2; ++pass )
+	{
+		// The seed snapshot restores the defs and the destroyed volume's slot
+		ENSURE( b3RecPlayer_GetFrame( player ) == 0 );
+		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( bodyIds[1], replayId ) ).displacedVolume == 0.18f );
+		ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( oldPoolId, replayId ) ) == false );
+		ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( poolId, replayId ) ) == false );
+
+		while ( b3RecPlayer_StepFrame( player ) )
+		{
+			int frame = b3RecPlayer_GetFrame( player );
+			ENSURE( 0 < frame && frame <= frameCount );
+			ENSURE( b3HashWorldState( b3GetWorldFromId( replayId ) ) == stateHashes[frame] );
+			ENSURE( HashFluidState( replayId, bodyIds, FLUID_BODY_COUNT ) == fluidHashes[frame] );
+		}
+
+		ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+		ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+		ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( poolId, replayId ) ) );
+		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( bodyIds[0], replayId ) ).displacedVolume == 0.2f );
+		ENSURE( b3Body_GetFluidDef( ToWorldBodyId( bodyIds[2], replayId ) ).enabled == false );
+
+		// Restart restores in place, and the world id survives
+		b3RecPlayer_Restart( player );
+		ENSURE( b3StoreWorldId( b3RecPlayer_GetWorldId( player ) ) == b3StoreWorldId( replayId ) );
+	}
+
+	// Skip forward onto a keyframe past the side volume's create, then back onto a keyframe before it
+	b3RecPlayer_SeekFrame( player, createFrame + 2 );
+	ENSURE( b3RecPlayer_GetFrame( player ) == createFrame + 2 );
+	ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( sideId, replayId ) ) );
+
+	b3RecPlayer_SeekFrame( player, createFrame - 2 );
+	ENSURE( b3RecPlayer_GetFrame( player ) == createFrame - 2 );
+	ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( sideId, replayId ) ) == false );
+	ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( poolId, replayId ) ) );
+	ENSURE( b3HashWorldState( b3GetWorldFromId( replayId ) ) == stateHashes[createFrame - 2] );
+	ENSURE( HashFluidState( replayId, bodyIds, FLUID_BODY_COUNT ) == fluidHashes[createFrame - 2] );
+
+	while ( b3RecPlayer_GetFrame( player ) < destroyFrame + 2 && b3RecPlayer_StepFrame( player ) )
+	{
+		int frame = b3RecPlayer_GetFrame( player );
+		ENSURE( b3HashWorldState( b3GetWorldFromId( replayId ) ) == stateHashes[frame] );
+		ENSURE( HashFluidState( replayId, bodyIds, FLUID_BODY_COUNT ) == fluidHashes[frame] );
+		ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( sideId, replayId ) ) == ( createFrame <= frame && frame < destroyFrame ) );
+	}
+
+	ENSURE( b3RecPlayer_GetFrame( player ) == destroyFrame + 2 );
+	ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+
+	b3DestroyPlayer( player );
+	b3DestroyRecording( rec );
+	return 0;
+}
+
+// Recording starts with bodies resting in a live volume, so the seed snapshot carries the side table's
+// in-fluid state. A replay that lost it would report fresh begin events on its first step.
+static int FluidMidStream( void )
+{
+	enum
+	{
+		frameCount = 40,
+	};
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = 1;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyId bodyIds[FLUID_BODY_COUNT];
+	CreateFluidScene( worldId, bodyIds );
+
+	b3FluidVolumeDef poolDef = FluidPoolDef();
+	b3FluidVolumeId poolId = b3CreateFluidVolume( worldId, &poolDef );
+
+	float timeStep = 1.0f / 60.0f;
+	int subStepCount = 4;
+	for ( int i = 0; i < 300; ++i )
+	{
+		b3World_Step( worldId, timeStep, subStepCount );
+	}
+
+	for ( int i = 0; i < FLUID_BODY_COUNT; ++i )
+	{
+		ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( bodyIds[i] ), poolId ) );
+	}
+
+	b3Recording* rec = b3CreateRecording( 0 );
+	ENSURE( rec != NULL );
+	b3World_StartRecording( worldId, rec );
+
+	uint64_t fluidHashes[frameCount + 1] = { 0 };
+	for ( int i = 1; i <= frameCount; ++i )
+	{
+		if ( i == 10 )
+		{
+			b3FluidVolume_SetDensity( poolId, 700.0f );
+		}
+		else if ( i == 20 )
+		{
+			b3BodyFluidDef def = b3DefaultBodyFluidDef();
+			def.enabled = false;
+			b3Body_SetFluidDef( bodyIds[0], &def );
+		}
+
+		b3World_Step( worldId, timeStep, subStepCount );
+		fluidHashes[i] = HashFluidState( worldId, bodyIds, FLUID_BODY_COUNT );
+
+		if ( i == 1 )
+		{
+			ENSURE( b3World_GetFluidEvents( worldId ).beginCount == 0 );
+		}
+	}
+
+	b3World_StopRecording( worldId );
+	b3DestroyWorld( worldId );
+
+	const uint8_t* data = b3Recording_GetData( rec );
+	int size = b3Recording_GetSize( rec );
+
+	ENSURE( b3ValidateReplay( data, size, 1 ) );
+	ENSURE( b3ValidateReplay( data, size, 4 ) );
+
+	b3RecPlayer* player = b3CreatePlayer( data, size, 4 );
+	ENSURE( player != NULL );
+	b3WorldId replayId = b3RecPlayer_GetWorldId( player );
+	ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( ToWorldBodyId( bodyIds[0], replayId ) ), ToWorldVolumeId( poolId, replayId ) ) );
+
+	while ( b3RecPlayer_StepFrame( player ) )
+	{
+		int frame = b3RecPlayer_GetFrame( player );
+		ENSURE( HashFluidState( replayId, bodyIds, FLUID_BODY_COUNT ) == fluidHashes[frame] );
+	}
+
+	ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+	ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+
+	b3DestroyPlayer( player );
+	b3DestroyRecording( rec );
+	return 0;
+}
+
+// The recording world stays alive, so the replay runs in another world slot and restore must rewrite
+// world0 in the side table. One floater is awake for the first step, the other bodies sleep in the pool
+// until it is destroyed, and it is the last volume, so no later fluid pass can repair a stale entry.
+static int FluidReplayWorldSlot( void )
+{
+	enum
+	{
+		frameCount = 20,
+		destroyFrame = 10,
+	};
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = 1;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyId bodyIds[FLUID_BODY_COUNT];
+	CreateFluidScene( worldId, bodyIds );
+
+	b3FluidVolumeDef poolDef = FluidPoolDef();
+	b3FluidVolumeId poolId = b3CreateFluidVolume( worldId, &poolDef );
+
+	float timeStep = 1.0f / 60.0f;
+	int subStepCount = 4;
+	bool asleep = false;
+	for ( int i = 0; i < 1000 && asleep == false; ++i )
+	{
+		b3World_Step( worldId, timeStep, subStepCount );
+
+		asleep = true;
+		for ( int j = 0; j < FLUID_BODY_COUNT; ++j )
+		{
+			asleep = asleep && b3Body_IsAwake( bodyIds[j] ) == false;
+		}
+	}
+
+	ENSURE( asleep );
+	for ( int i = 0; i < FLUID_BODY_COUNT; ++i )
+	{
+		ENSURE( B3_ID_EQUALS( b3Body_GetFluidVolume( bodyIds[i] ), poolId ) );
+	}
+
+	b3Body_SetAwake( bodyIds[0], true );
+
+	b3Recording* rec = b3CreateRecording( 0 );
+	ENSURE( rec != NULL );
+	b3World_StartRecording( worldId, rec );
+
+	int beginCounts[frameCount + 1] = { 0 };
+	int endCounts[frameCount + 1] = { 0 };
+	int endMasks[frameCount + 1] = { 0 };
+	uint64_t fluidHashes[frameCount + 1] = { 0 };
+	for ( int i = 1; i <= frameCount; ++i )
+	{
+		if ( i == destroyFrame )
+		{
+			b3DestroyFluidVolume( poolId );
+		}
+
+		b3World_Step( worldId, timeStep, subStepCount );
+
+		b3FluidEvents events = b3World_GetFluidEvents( worldId );
+		beginCounts[i] = events.beginCount;
+		endCounts[i] = events.endCount;
+		endMasks[i] = GetFluidEndMask( worldId, bodyIds, FLUID_BODY_COUNT );
+		fluidHashes[i] = HashFluidState( worldId, bodyIds, FLUID_BODY_COUNT );
+	}
+
+	b3World_StopRecording( worldId );
+
+	// The awake floater raises no event on the first step, and the destroy ends every body's touch
+	ENSURE( beginCounts[1] == 0 && endCounts[1] == 0 );
+	ENSURE( endCounts[destroyFrame] == FLUID_BODY_COUNT );
+	ENSURE( endMasks[destroyFrame] == ( 1 << FLUID_BODY_COUNT ) - 1 );
+
+	const uint8_t* data = b3Recording_GetData( rec );
+	int size = b3Recording_GetSize( rec );
+	ENSURE( b3ValidateReplay( data, size, 1 ) );
+
+	b3RecPlayer* player = b3CreatePlayer( data, size, 4 );
+	ENSURE( player != NULL );
+	b3WorldId replayId = b3RecPlayer_GetWorldId( player );
+	ENSURE( replayId.index1 != worldId.index1 );
+
+	for ( int pass = 0; pass < 2; ++pass )
+	{
+		// The restored side table names the replay world's pool
+		ENSURE( b3RecPlayer_GetFrame( player ) == 0 );
+		for ( int i = 0; i < FLUID_BODY_COUNT; ++i )
+		{
+			b3FluidVolumeId volumeId = b3Body_GetFluidVolume( ToWorldBodyId( bodyIds[i], replayId ) );
+			ENSURE( volumeId.world0 == replayId.index1 - 1 );
+			ENSURE( B3_ID_EQUALS( volumeId, ToWorldVolumeId( poolId, replayId ) ) );
+			ENSURE( b3FluidVolume_IsValid( volumeId ) );
+		}
+
+		while ( b3RecPlayer_StepFrame( player ) )
+		{
+			int frame = b3RecPlayer_GetFrame( player );
+			b3FluidEvents events = b3World_GetFluidEvents( replayId );
+			ENSURE( events.beginCount == beginCounts[frame] );
+			ENSURE( events.endCount == endCounts[frame] );
+			ENSURE( GetFluidEndMask( replayId, bodyIds, FLUID_BODY_COUNT ) == endMasks[frame] );
+			ENSURE( HashFluidState( replayId, bodyIds, FLUID_BODY_COUNT ) == fluidHashes[frame] );
+		}
+
+		ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+		ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+		b3RecPlayer_Restart( player );
+	}
+
+	b3DestroyPlayer( player );
+	b3DestroyRecording( rec );
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Flags of the snapshot that seeds a recording. The snapshot header is magic, version, layout hash, flags.
+static uint32_t GetSeedSnapshotFlags( const b3Recording* rec )
+{
+	uint32_t flags;
+	memcpy( &flags, b3Recording_GetData( rec ) + sizeof( b3RecHeader ) + 12, sizeof( flags ) );
+	return flags;
+}
+
+// A world without fluid serializes as before, with no flag bit and no section. The first fluid
+// mutator only sets the bit and appends the section. A rewind to before that mutator removes it again.
+static int FluidSnapshotSection( void )
+{
+	const uint32_t fluidFlag = 0x80000000u;
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyId bodyIds[FLUID_BODY_COUNT];
+	CreateFluidScene( worldId, bodyIds );
+
+	for ( int i = 0; i < 10; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	b3Recording* plainRec = b3CreateRecording( 0 );
+	b3World_StartRecording( worldId, plainRec );
+	b3World_StopRecording( worldId );
+
+	// A def on a body out of fluid changes nothing but the fluid world
+	b3BodyFluidDef def = b3DefaultBodyFluidDef();
+	def.displacedVolume = 0.1f;
+	b3Body_SetFluidDef( bodyIds[0], &def );
+
+	b3Recording* fluidRec = b3CreateRecording( 0 );
+	b3World_StartRecording( worldId, fluidRec );
+	b3World_StopRecording( worldId );
+
+	b3RecHeader plainHeader;
+	b3RecHeader fluidHeader;
+	memcpy( &plainHeader, b3Recording_GetData( plainRec ), sizeof( b3RecHeader ) );
+	memcpy( &fluidHeader, b3Recording_GetData( fluidRec ), sizeof( b3RecHeader ) );
+	int plainSize = (int)plainHeader.snapshotSize;
+	int fluidSize = (int)fluidHeader.snapshotSize;
+	const uint8_t* plainImage = b3Recording_GetData( plainRec ) + sizeof( b3RecHeader );
+	const uint8_t* fluidImage = b3Recording_GetData( fluidRec ) + sizeof( b3RecHeader );
+
+	uint32_t plainFlags = GetSeedSnapshotFlags( plainRec );
+	ENSURE( ( plainFlags & fluidFlag ) == 0 );
+	ENSURE( GetSeedSnapshotFlags( fluidRec ) == ( plainFlags | fluidFlag ) );
+	ENSURE( fluidSize > plainSize );
+	ENSURE( memcmp( plainImage, fluidImage, 12 ) == 0 );
+	ENSURE( memcmp( plainImage + 16, fluidImage + 16, (size_t)plainSize - 16 ) == 0 );
+
+	ENSURE( b3ValidateReplay( b3Recording_GetData( plainRec ), b3Recording_GetSize( plainRec ), 1 ) );
+	ENSURE( b3ValidateReplay( b3Recording_GetData( fluidRec ), b3Recording_GetSize( fluidRec ), 1 ) );
+
+	b3DestroyRecording( plainRec );
+	b3DestroyRecording( fluidRec );
+	b3DestroyWorld( worldId );
+
+	// Fluid first appears during the recording
+	worldId = b3CreateWorld( &worldDef );
+	CreateFluidScene( worldId, bodyIds );
+
+	b3Recording* rec = b3CreateRecording( 0 );
+	b3World_StartRecording( worldId, rec );
+	ENSURE( ( GetSeedSnapshotFlags( rec ) & fluidFlag ) == 0 );
+
+	b3FluidVolumeDef poolDef = FluidPoolDef();
+	b3CreateFluidVolume( worldId, &poolDef );
+
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	b3World_StopRecording( worldId );
+	b3DestroyWorld( worldId );
+
+	b3RecPlayer* player = b3CreatePlayer( b3Recording_GetData( rec ), b3Recording_GetSize( rec ), 1 );
+	ENSURE( player != NULL );
+	b3World* replayWorld = b3GetWorldFromId( b3RecPlayer_GetWorldId( player ) );
+
+	for ( int pass = 0; pass < 2; ++pass )
+	{
+		ENSURE( replayWorld->fluid == NULL );
+
+		while ( b3RecPlayer_StepFrame( player ) )
+		{
+		}
+
+		ENSURE( replayWorld->fluid != NULL );
+		ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+		b3RecPlayer_Restart( player );
+	}
+
+	b3DestroyPlayer( player );
+	b3DestroyRecording( rec );
+	return 0;
+}
+
+#define MANY_BODY_COUNT 25
+
+// Abutting 4 x 3 pool tiles over the slab at three surface levels, with currents across the seams
+static b3FluidVolumeDef ManyTileDef( int tile )
+{
+	int ix = tile % 4;
+	int iz = tile / 4;
+	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
+	def.bounds = (b3AABB){ { -12.0f + 6.0f * ix, -1.0f, -9.0f + 6.0f * iz },
+						   { -6.0f + 6.0f * ix, 6.0f, -3.0f + 6.0f * iz } };
+	def.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.0f + 0.2f * ( ( ix + iz ) % 3 ) };
+	def.flowVelocity = (b3Vec3){ 0.4f, 0.0f, 0.3f * ( 1 - iz ) };
+	return def;
+}
+
+// Volumes no body enters: binned beside, above and far from the pool, and unbinned
+static b3FluidVolumeDef ManyDecoyDef( int decoy )
+{
+	b3FluidVolumeDef def = b3DefaultFluidVolumeDef();
+	def.surface = (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.0f };
+	switch ( decoy )
+	{
+		case 0:
+			def.bounds = (b3AABB){ { 16.0f, -1.0f, -4.0f }, { 22.0f, 6.0f, 4.0f } };
+			break;
+		case 1:
+			def.bounds = (b3AABB){ { -10.0f, 20.0f, -8.0f }, { 10.0f, 26.0f, 8.0f } };
+			def.surface.offset = 24.0f;
+			break;
+		case 2:
+			def.bounds = (b3AABB){ { -6.0f, -1.0f, -30.0f }, { 6.0f, 6.0f, -20.0f } };
+			break;
+		case 3:
+			def.bounds = (b3AABB){ { -40.0f, -1.0f, -5.0f }, { -30.0f, 6.0f, 5.0f } };
+			def.surface = (b3Plane){ { 1.0f, 0.0f, 0.0f }, -32.0f };
+			break;
+		case 4:
+			def.bounds.lowerBound.y = -200.0f;
+			def.bounds.upperBound.y = -100.0f;
+			def.surface.offset = -150.0f;
+			break;
+		case 5:
+			def.bounds = (b3AABB){ { 16.0f, 10.0f, 10.0f }, { 22.0f, 14.0f, 16.0f } };
+			def.surface = (b3Plane){ { 0.0f, -1.0f, 0.0f }, -12.0f };
+			break;
+		case 6:
+			def.bounds = (b3AABB){ { 30.0f, -1.0f, 30.0f }, { 30.5f, 2.0f, 30.5f } };
+			def.surface.offset = 1.0f;
+			break;
+		default:
+			def.bounds = (b3AABB){ { -5.0f, -1.0f, 30.0f }, { 5.0f, 6.0f, 40.0f } };
+			def.surface = (b3Plane){ { 0.0f, 0.0f, 1.0f }, 35.0f };
+			break;
+	}
+	return def;
+}
+
+// Floaters and sinkers in a 6 x 4 grid over the tiles, one row on a seam, and a ball on the slab
+// just past the grid's -x edge
+static void CreateManyVolumeScene( b3WorldId worldId, b3BodyId* bodyIds )
+{
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.type = b3_staticBody;
+	groundDef.position = (b3Pos){ 0.0f, -1.0f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3BoxHull groundBox = b3MakeBoxHull( 20.0f, 1.0f, 20.0f );
+	b3ShapeDef groundShapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( groundId, &groundShapeDef, &groundBox.base );
+
+	const float rowZ[4] = { -7.5f, -3.0f, 2.5f, 6.9f };
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+
+	for ( int i = 0; i < MANY_BODY_COUNT - 1; ++i )
+	{
+		float x = -10.5f + 4.2f * ( i % 6 );
+		bodyDef.position = (b3Pos){ x, 3.5f + 0.3f * ( i % 3 ), rowZ[i / 6] };
+		bodyDef.rotation = b3MakeQuatFromAxisAngle( (b3Vec3){ 0.0f, 0.0f, 1.0f }, 0.1f * i );
+		bodyIds[i] = b3CreateBody( worldId, &bodyDef );
+
+		int kind = i % 4;
+		if ( kind == 0 )
+		{
+			shapeDef.density = 500.0f;
+			b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.35f };
+			b3CreateSphereShape( bodyIds[i], &shapeDef, &sphere );
+		}
+		else if ( kind == 1 )
+		{
+			shapeDef.density = 600.0f;
+			b3BoxHull box = b3MakeBoxHull( 0.3f, 0.3f, 0.3f );
+			b3CreateHullShape( bodyIds[i], &shapeDef, &box.base );
+		}
+		else if ( kind == 2 )
+		{
+			shapeDef.density = 700.0f;
+			b3Capsule capsule = { { -0.35f, 0.0f, 0.0f }, { 0.35f, 0.0f, 0.0f }, 0.18f };
+			b3CreateCapsuleShape( bodyIds[i], &shapeDef, &capsule );
+		}
+		else
+		{
+			shapeDef.density = 2500.0f;
+			b3Sphere sinker = { { 0.0f, 0.0f, 0.0f }, 0.25f };
+			b3CreateSphereShape( bodyIds[i], &shapeDef, &sinker );
+		}
+	}
+
+	bodyDef.position = (b3Pos){ -12.2f, 0.35f, 0.0f };
+	bodyDef.rotation = b3Quat_identity;
+	bodyIds[MANY_BODY_COUNT - 1] = b3CreateBody( worldId, &bodyDef );
+	shapeDef.density = 500.0f;
+	b3Sphere ball = { { 0.0f, 0.0f, 0.0f }, 0.35f };
+	b3CreateSphereShape( bodyIds[MANY_BODY_COUNT - 1], &shapeDef, &ball );
+}
+
+// Twenty volumes, binned and unbinned, created, destroyed, re-bounded and turned during recording.
+// Replays at 1 and 4 workers check every frame, restart, and seek back across a destroy and create.
+static int FluidManyVolumes( void )
+{
+	enum
+	{
+		tileCount = 12,
+		decoyCount = 8,
+		frameCount = 120,
+		swapFrame = 45,
+		destroyFrame = 60,
+		createFrame = 75,
+	};
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.workerCount = 1;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyId bodyIds[MANY_BODY_COUNT];
+	CreateManyVolumeScene( worldId, bodyIds );
+
+	// Half the decoys take lower volume indices than the tiles, half higher
+	b3FluidVolumeId tileIds[tileCount];
+	b3FluidVolumeId decoyIds[decoyCount];
+	for ( int i = 0; i < decoyCount / 2; ++i )
+	{
+		b3FluidVolumeDef def = ManyDecoyDef( i );
+		decoyIds[i] = b3CreateFluidVolume( worldId, &def );
+	}
+
+	for ( int i = 0; i < tileCount; ++i )
+	{
+		b3FluidVolumeDef def = ManyTileDef( i );
+		tileIds[i] = b3CreateFluidVolume( worldId, &def );
+	}
+
+	for ( int i = decoyCount / 2; i < decoyCount; ++i )
+	{
+		b3FluidVolumeDef def = ManyDecoyDef( i );
+		decoyIds[i] = b3CreateFluidVolume( worldId, &def );
+	}
+
+	float timeStep = 1.0f / 60.0f;
+	int subStepCount = 4;
+	for ( int i = 0; i < 60; ++i )
+	{
+		b3World_Step( worldId, timeStep, subStepCount );
+	}
+
+	// The recording starts with the bodies spread over the tiles
+	int occupiedCount = 0;
+	for ( int i = 0; i < MANY_BODY_COUNT; ++i )
+	{
+		b3FluidVolumeId volumeId = b3Body_GetFluidVolume( bodyIds[i] );
+		bool seen = B3_IS_NULL( volumeId );
+		for ( int j = 0; j < i && seen == false; ++j )
+		{
+			seen = B3_ID_EQUALS( b3Body_GetFluidVolume( bodyIds[j] ), volumeId );
+		}
+		occupiedCount += seen ? 0 : 1;
+	}
+	ENSURE( occupiedCount >= 6 );
+
+	b3Recording* rec = b3CreateRecording( 0 );
+	ENSURE( rec != NULL );
+	b3World_StartRecording( worldId, rec );
+
+	b3AABB grownBounds = ManyTileDef( 5 ).bounds;
+	grownBounds.lowerBound.x -= 1.5f;
+	grownBounds.upperBound.x += 1.5f;
+
+	// Over the last tile column, level with one tile and below the other two
+	b3AABB movedDecoyBounds = { { 6.0f, -1.0f, -9.0f }, { 14.0f, 6.0f, 9.0f } };
+
+	b3FluidVolumeDef swapDef = ManyTileDef( 9 );
+	swapDef.surface.offset = 1.4f;
+	swapDef.flowVelocity = (b3Vec3){ -0.4f, 0.0f, 0.0f };
+	b3FluidVolumeDef recreateDef = ManyTileDef( 2 );
+
+	b3FluidVolumeId swapId = b3_nullFluidVolumeId;
+	b3FluidVolumeId recreatedId = b3_nullFluidVolumeId;
+
+	uint64_t stateHashes[frameCount + 1] = { 0 };
+	uint64_t fluidHashes[frameCount + 1] = { 0 };
+	int beginCount = 0;
+	int endCount = 0;
+	int ballWetCount = 0;
+
+	for ( int i = 1; i <= frameCount; ++i )
+	{
+		switch ( i )
+		{
+			case 10:
+				b3FluidVolume_SetBounds( tileIds[5], grownBounds );
+				break;
+			case 20:
+				// Two tiles turn to the x axis and leave the grid, one reaching the ball
+				b3FluidVolume_SetSurface( tileIds[4], (b3Plane){ { -1.0f, 0.0f, 0.0f }, 12.5f } );
+				b3FluidVolume_SetSurface( tileIds[6], (b3Plane){ { 1.0f, 0.0f, 0.0f }, 2.4f } );
+				break;
+			case 25:
+				// A decoy joins the grid and stretches it
+				b3FluidVolume_SetSurface( decoyIds[3], (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.0f } );
+				break;
+			case 35:
+				b3FluidVolume_SetSurface( tileIds[4], ManyTileDef( 4 ).surface );
+				b3FluidVolume_SetSurface( tileIds[6], (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.3f } );
+				break;
+			case swapFrame:
+				// The new tile takes the slot with the next generation
+				b3DestroyFluidVolume( tileIds[9] );
+				swapId = b3CreateFluidVolume( worldId, &swapDef );
+				break;
+			case destroyFrame:
+				b3DestroyFluidVolume( tileIds[2] );
+				b3DestroyFluidVolume( decoyIds[1] );
+				b3DestroyFluidVolume( decoyIds[4] );
+				break;
+			case createFrame:
+				recreatedId = b3CreateFluidVolume( worldId, &recreateDef );
+				break;
+			case 90:
+				b3FluidVolume_SetBounds( decoyIds[0], movedDecoyBounds );
+				break;
+			case 100:
+				b3FluidVolume_SetSurface( tileIds[0], (b3Plane){ { 0.0f, 1.0f, 0.0f }, 2.6f } );
+				break;
+			case 105:
+				b3FluidVolume_SetBounds( tileIds[5], ManyTileDef( 5 ).bounds );
+				break;
+			default:
+				break;
+		}
+
+		b3World_Step( worldId, timeStep, subStepCount );
+
+		stateHashes[i] = b3HashWorldState( b3GetWorldFromId( worldId ) );
+		fluidHashes[i] = HashFluidState( worldId, bodyIds, MANY_BODY_COUNT );
+
+		b3FluidEvents events = b3World_GetFluidEvents( worldId );
+		beginCount += events.beginCount;
+		endCount += events.endCount;
+
+		// Past the grid edge only the turned tile reaches the ball, so a stale lookup misses it
+		b3FluidVolumeId ballVolumeId = b3Body_GetFluidVolume( bodyIds[MANY_BODY_COUNT - 1] );
+		ballWetCount += ( 20 <= i && i < 35 && B3_ID_EQUALS( ballVolumeId, tileIds[4] ) ) ? 1 : 0;
+	}
+
+	ENSURE( swapId.index1 == tileIds[9].index1 && swapId.generation != tileIds[9].generation );
+
+	// Final defs of the live volumes for the replay to match
+	b3FluidVolumeId liveIds[tileCount + decoyCount] = { 0 };
+	b3FluidVolumeDef liveDefs[tileCount + decoyCount];
+	int liveCount = 0;
+	for ( int i = 0; i < tileCount + decoyCount; ++i )
+	{
+		b3FluidVolumeId volumeId = i < tileCount ? tileIds[i] : decoyIds[i - tileCount];
+		if ( i == 2 || i == 9 )
+		{
+			// The replacement tiles
+			volumeId = i == 2 ? recreatedId : swapId;
+		}
+
+		if ( b3FluidVolume_IsValid( volumeId ) )
+		{
+			liveIds[liveCount] = volumeId;
+			liveDefs[liveCount] = b3FluidVolume_GetDef( volumeId );
+			liveCount += 1;
+		}
+	}
+
+	b3World_StopRecording( worldId );
+	b3DestroyWorld( worldId );
+
+	ENSURE( liveCount == tileCount + decoyCount - 2 );
+	ENSURE( beginCount > 0 && endCount > 0 );
+	ENSURE( ballWetCount > 0 );
+
+	const uint8_t* data = b3Recording_GetData( rec );
+	int size = b3Recording_GetSize( rec );
+
+	ENSURE( b3ValidateReplay( data, size, 1 ) );
+	ENSURE( b3ValidateReplay( data, size, 4 ) );
+
+	const int workerCounts[2] = { 1, 4 };
+	for ( int w = 0; w < 2; ++w )
+	{
+		b3RecPlayer* player = b3CreatePlayer( data, size, workerCounts[w] );
+		ENSURE( player != NULL );
+		b3RecPlayer_SetKeyframePolicy( player, b3RecPlayer_GetKeyframeBudget( player ), 4 );
+		b3WorldId replayId = b3RecPlayer_GetWorldId( player );
+
+		for ( int pass = 0; pass < 2; ++pass )
+		{
+			ENSURE( b3RecPlayer_GetFrame( player ) == 0 );
+			ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( tileIds[9], replayId ) ) );
+			ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( swapId, replayId ) ) == false );
+
+			while ( b3RecPlayer_StepFrame( player ) )
+			{
+				int frame = b3RecPlayer_GetFrame( player );
+				ENSURE( 0 < frame && frame <= frameCount );
+				ENSURE( b3HashWorldState( b3GetWorldFromId( replayId ) ) == stateHashes[frame] );
+				ENSURE( HashFluidState( replayId, bodyIds, MANY_BODY_COUNT ) ==
+						fluidHashes[frame] );
+			}
+
+			ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+			ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+
+			for ( int i = 0; i < liveCount; ++i )
+			{
+				b3FluidVolumeDef def =
+					b3FluidVolume_GetDef( ToWorldVolumeId( liveIds[i], replayId ) );
+				ENSURE( memcmp( &def.bounds, &liveDefs[i].bounds, sizeof( b3AABB ) ) == 0 );
+				ENSURE( memcmp( &def.surface, &liveDefs[i].surface, sizeof( b3Plane ) ) == 0 );
+				ENSURE( memcmp( &def.flowVelocity, &liveDefs[i].flowVelocity, sizeof( b3Vec3 ) ) ==
+						0 );
+			}
+
+			b3RecPlayer_Restart( player );
+			ENSURE( b3StoreWorldId( b3RecPlayer_GetWorldId( player ) ) ==
+					b3StoreWorldId( replayId ) );
+		}
+
+		// From the end back onto a keyframe before the swap, across the create, destroy and swap
+		b3RecPlayer_SeekFrame( player, frameCount );
+		ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+
+		b3RecPlayer_SeekFrame( player, swapFrame - 2 );
+		ENSURE( b3RecPlayer_GetFrame( player ) == swapFrame - 2 );
+		ENSURE( b3HashWorldState( b3GetWorldFromId( replayId ) ) == stateHashes[swapFrame - 2] );
+		ENSURE( HashFluidState( replayId, bodyIds, MANY_BODY_COUNT ) ==
+				fluidHashes[swapFrame - 2] );
+
+		while ( b3RecPlayer_GetFrame( player ) < frameCount && b3RecPlayer_StepFrame( player ) )
+		{
+			int frame = b3RecPlayer_GetFrame( player );
+			ENSURE( b3HashWorldState( b3GetWorldFromId( replayId ) ) == stateHashes[frame] );
+			ENSURE( HashFluidState( replayId, bodyIds, MANY_BODY_COUNT ) == fluidHashes[frame] );
+			ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( tileIds[9], replayId ) ) ==
+					( frame < swapFrame ) );
+			ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( swapId, replayId ) ) ==
+					( swapFrame <= frame ) );
+			ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( tileIds[2], replayId ) ) ==
+					( frame < destroyFrame ) );
+			ENSURE( b3FluidVolume_IsValid( ToWorldVolumeId( recreatedId, replayId ) ) ==
+					( createFrame <= frame ) );
+		}
+
+		ENSURE( b3RecPlayer_GetFrame( player ) == frameCount );
+
+		// Each seek restores a keyframe and rebuilds the lookup, which must match the kept one
+		for ( int target = frameCount - 1; target > 0; --target )
+		{
+			b3RecPlayer_SeekFrame( player, target );
+			ENSURE( b3RecPlayer_GetFrame( player ) == target );
+			ENSURE( b3HashWorldState( b3GetWorldFromId( replayId ) ) == stateHashes[target] );
+			ENSURE( HashFluidState( replayId, bodyIds, MANY_BODY_COUNT ) == fluidHashes[target] );
+		}
+
+		ENSURE( b3RecPlayer_HasDiverged( player ) == false );
+		b3DestroyPlayer( player );
+	}
+
+	b3DestroyRecording( rec );
+	return 0;
+}
+
 int RecordingTest( void )
 {
 	RUN_SUBTEST( GeometryHashCollision );
@@ -2407,6 +3467,11 @@ int RecordingTest( void )
 	RUN_SUBTEST( TransformedHullRoundTrip );
 	RUN_SUBTEST( GeometryMutatorReplay );
 	RUN_SUBTEST( AllOps );
+	RUN_SUBTEST( FluidRoundTrip );
+	RUN_SUBTEST( FluidMidStream );
+	RUN_SUBTEST( FluidReplayWorldSlot );
+	RUN_SUBTEST( FluidSnapshotSection );
+	RUN_SUBTEST( FluidManyVolumes );
 	RUN_SUBTEST( ReservedHeaderBytes );
 	RUN_SUBTEST( CorruptCompound );
 	return 0;

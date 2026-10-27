@@ -35,6 +35,8 @@ set(BOX3D_SOURCE_FILES
 	distance.c
 	dynamic_tree.c
 	dynamic_tree.h
+	fluid.c
+	fluid.h
 	height_field.c
 	hull.c
 	hull.h
@@ -111,6 +113,7 @@ set(BOX3D_INCLUDE_FILES
 	../include/box3d/collision.h
 	../include/box3d/config.h
 	../include/box3d/constants.h
+	../include/box3d/fluid.h
 	../include/box3d/id.h
 	../include/box3d/math_functions.h
 	../include/box3d/types.h
