@@ -246,6 +246,8 @@ b3RevoluteJointDef b3RecR_REVOLUTEJOINTDEF( b3RecReader* rdr );
 b3SphericalJointDef b3RecR_SPHERICALJOINTDEF( b3RecReader* rdr );
 b3WeldJointDef b3RecR_WELDJOINTDEF( b3RecReader* rdr );
 b3WheelJointDef b3RecR_WHEELJOINTDEF( b3RecReader* rdr );
+b3MoverJointDef b3RecR_MOVERJOINTDEF( b3RecReader* rdr );
+b3PogoJointDef b3RecR_POGOJOINTDEF( b3RecReader* rdr );
 b3Plane b3RecR_PLANE( b3RecReader* rdr );
 b3FluidVolumeId b3RecR_FLUIDVOLUMEID( b3RecReader* rdr );
 b3FluidVolumeDef b3RecR_FLUIDVOLUMEDEF( b3RecReader* rdr );

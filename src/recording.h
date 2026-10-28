@@ -53,7 +53,7 @@ typedef struct b3World b3World;
 
 // Minor tracks op-stream additions that keep the 48 byte header shape.
 // Minor version 7 made the contact body sim locators persistent
-#define B3_REC_VERSION_MINOR 9
+#define B3_REC_VERSION_MINOR 10
 
 // File header, fixed 48 bytes. Contains the registry locator so the player
 // can load geometry before replaying any ops.
@@ -197,6 +197,8 @@ typedef b3RevoluteJointDef b3RecCType_REVOLUTEJOINTDEF;
 typedef b3SphericalJointDef b3RecCType_SPHERICALJOINTDEF;
 typedef b3WeldJointDef b3RecCType_WELDJOINTDEF;
 typedef b3WheelJointDef b3RecCType_WHEELJOINTDEF;
+typedef b3MoverJointDef b3RecCType_MOVERJOINTDEF;
+typedef b3PogoJointDef b3RecCType_POGOJOINTDEF;
 typedef b3Plane b3RecCType_PLANE;
 typedef b3FluidVolumeId b3RecCType_FLUIDVOLUMEID;
 typedef b3FluidVolumeDef b3RecCType_FLUIDVOLUMEDEF;
@@ -271,6 +273,8 @@ void b3RecW_REVOLUTEJOINTDEF( b3RecBuffer* buf, b3RevoluteJointDef v );
 void b3RecW_SPHERICALJOINTDEF( b3RecBuffer* buf, b3SphericalJointDef v );
 void b3RecW_WELDJOINTDEF( b3RecBuffer* buf, b3WeldJointDef v );
 void b3RecW_WHEELJOINTDEF( b3RecBuffer* buf, b3WheelJointDef v );
+void b3RecW_MOVERJOINTDEF( b3RecBuffer* buf, b3MoverJointDef v );
+void b3RecW_POGOJOINTDEF( b3RecBuffer* buf, b3PogoJointDef v );
 void b3RecW_PLANE( b3RecBuffer* buf, b3Plane v );
 void b3RecW_FLUIDVOLUMEID( b3RecBuffer* buf, b3FluidVolumeId v );
 void b3RecW_FLUIDVOLUMEDEF( b3RecBuffer* buf, b3FluidVolumeDef v );
