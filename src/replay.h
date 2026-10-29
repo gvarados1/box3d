@@ -81,6 +81,7 @@ typedef struct b3RecReader
 	const uint8_t* data;
 	int size;
 	int cursor;
+	int recordEnd; // end of the record being dispatched, so a reader can skip fields older recordings lack
 	b3WorldId replayWorldId;
 	bool ok;	   // false on read overrun or id mismatch, fatal stop
 	bool diverged; // a StateHash failed, non-fatal

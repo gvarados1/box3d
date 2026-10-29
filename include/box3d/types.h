@@ -1142,6 +1142,11 @@ typedef struct b3ExplosionDef
 	/// is facing the explosion. Explosions only apply to spheres, capsules, and hulls. This
 	/// may be negative for implosions.
 	float impulsePerArea;
+
+	/// MineMogul fork: aims the impulse from a center this far below position along the world
+	/// y-axis, so positive values throw bodies upward. Reach and falloff still use position. Like
+	/// the PhysX AddExplosionForce upwardsModifier.
+	float upwardsModifier;
 } b3ExplosionDef;
 
 /// Use this to initialize your explosion definition

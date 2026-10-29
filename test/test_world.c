@@ -1384,6 +1384,72 @@ static int TestExplosion( void )
 	return 0;
 }
 
+// Explode near a unit sphere at the origin, which can be turned, and capture the impulse it receives.
+static ExplosionResult RunLiftedExplosion( b3Vec3 blast, b3Quat rotation, float radius, float upwardsModifier )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.rotation = rotation;
+	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+
+	b3Sphere sphere = { b3Vec3_zero, 1.0f };
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+
+	b3ExplosionDef explosionDef = b3DefaultExplosionDef();
+	explosionDef.position = b3OffsetPos( b3Pos_zero, blast );
+	explosionDef.radius = radius;
+	explosionDef.falloff = 0.0f;
+	explosionDef.impulsePerArea = 10.0f;
+	explosionDef.upwardsModifier = upwardsModifier;
+	b3World_Explode( worldId, &explosionDef );
+
+	ExplosionResult result;
+	result.linearVelocity = b3Body_GetLinearVelocity( bodyId );
+	result.angularVelocity = b3Body_GetAngularVelocity( bodyId );
+
+	b3DestroyWorld( worldId );
+	return result;
+}
+
+static int TestExplosionUpwardsModifier( void )
+{
+	// The sphere is 2 from the blast and 3.24 from the lowered center, so a 2.5 radius reaches it only
+	// when reach is measured from the real center
+	b3Vec3 side = { 3.0f, 0.0f, 0.0f };
+	ExplosionResult radial = RunLiftedExplosion( side, b3Quat_identity, 2.5f, 0.0f );
+	ExplosionResult lifted = RunLiftedExplosion( side, b3Quat_identity, 2.5f, 3.0f );
+
+	// Aimed from ( 3, -3, 0 ) at the witness point ( 1, 0, 0 ), so along ( -2, 3, 0 )
+	ENSURE( lifted.linearVelocity.x < -1.0e-4f );
+	ENSURE_SMALL( lifted.linearVelocity.y + 1.5f * lifted.linearVelocity.x, 1.0e-4f );
+	ENSURE_SMALL( lifted.linearVelocity.z, 1.0e-6f );
+
+	// A sphere faces the same area from every side, so only the direction changes
+	ENSURE_SMALL( b3Length( lifted.linearVelocity ) - b3Length( radial.linearVelocity ), 1.0e-4f );
+
+	// The impulse still lands at the witness point, now off the line through the center
+	ENSURE( lifted.angularVelocity.z > 1.0e-4f );
+
+	// The lift follows world y however the body is turned
+	b3Quat turned = b3MakeQuatFromAxisAngle( b3Normalize( (b3Vec3){ 1.0f, 2.0f, 3.0f } ), 1.0f );
+	ExplosionResult turnedResult = RunLiftedExplosion( side, turned, 2.5f, 3.0f );
+	ENSURE_SMALL( turnedResult.linearVelocity.x - lifted.linearVelocity.x, 1.0e-4f );
+	ENSURE_SMALL( turnedResult.linearVelocity.y - lifted.linearVelocity.y, 1.0e-4f );
+	ENSURE_SMALL( turnedResult.linearVelocity.z - lifted.linearVelocity.z, 1.0e-4f );
+
+	// From above, the lowered center touches the sphere but the real one is 2 away, out of a 1.5 radius
+	b3Vec3 above = { 0.0f, 3.0f, 0.0f };
+	ExplosionResult missed = RunLiftedExplosion( above, b3Quat_identity, 1.5f, 2.0f );
+	ENSURE_SMALL( b3Length( missed.linearVelocity ), 1.0e-6f );
+
+	return 0;
+}
+
 // Ensure correct move events from bodies involved in CCD.
 static int TestContinuousMoveEvent( void )
 {
@@ -1806,6 +1872,7 @@ int WorldTest( void )
 	RUN_SUBTEST( TestWorldRecycle );
 	RUN_SUBTEST( TestWorldCoverage );
 	RUN_SUBTEST( TestExplosion );
+	RUN_SUBTEST( TestExplosionUpwardsModifier );
 	RUN_SUBTEST( TestSensor );
 	RUN_SUBTEST( TestContinuousMoveEvent );
 	RUN_SUBTEST( TestContactEvents );

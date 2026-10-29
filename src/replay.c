@@ -413,6 +413,12 @@ b3ExplosionDef b3RecR_EXPLOSIONDEF( b3RecReader* rdr )
 	def.radius = b3RecR_F32( rdr );
 	def.falloff = b3RecR_F32( rdr );
 	def.impulsePerArea = b3RecR_F32( rdr );
+
+	// Recordings made before upwardsModifier end the record here
+	if ( rdr->cursor < rdr->recordEnd )
+	{
+		def.upwardsModifier = b3RecR_F32( rdr );
+	}
 	return def;
 }
 
@@ -2324,6 +2330,8 @@ static int b3RecDispatchOne( b3RecReader* rdr )
 	}
 
 	int payloadStart = rdr->cursor;
+	// The size comes from the file, so clamp the end to the data
+	rdr->recordEnd = payloadSize <= (uint32_t)( rdr->size - payloadStart ) ? payloadStart + (int)payloadSize : rdr->size;
 
 	switch ( opcode )
 	{

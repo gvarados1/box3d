@@ -1716,6 +1716,7 @@ static int AllOps( void )
 	explosion.radius = 3.0f;
 	explosion.falloff = 1.0f;
 	explosion.impulsePerArea = 2.0f;
+	explosion.upwardsModifier = 0.5f;
 	b3World_Explode( worldId, &explosion );
 
 	// Pre-step queries
@@ -3801,6 +3802,101 @@ static int FluidRotationRoundTrip( void )
 	return 0;
 }
 
+// Record a sphere hit by an explosion with the given lift
+static b3Recording* RecordLiftedExplosion( float upwardsModifier )
+{
+	b3Recording* rec = b3CreateRecording( 0 );
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	b3World_StartRecording( worldId, rec );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = (b3Pos){ 0.0f, 5.0f, 0.0f };
+	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.5f };
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+
+	b3ExplosionDef explosion = b3DefaultExplosionDef();
+	explosion.position = (b3Pos){ 1.5f, 5.0f, 0.0f };
+	explosion.radius = 3.0f;
+	explosion.impulsePerArea = 2.0f;
+	explosion.upwardsModifier = upwardsModifier;
+	b3World_Explode( worldId, &explosion );
+
+	for ( int i = 0; i < 10; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	b3World_StopRecording( worldId );
+	b3DestroyWorld( worldId );
+	return rec;
+}
+
+// The lift must replay, and recordings made before it existed, whose explosion record ends at
+// impulsePerArea, must still read every op.
+static int ExplosionLiftReplay( void )
+{
+	b3Recording* lifted = RecordLiftedExplosion( 1.5f );
+	ENSURE( lifted != NULL );
+	ENSURE( b3ValidateReplay( b3Recording_GetData( lifted ), b3Recording_GetSize( lifted ), 1 ) );
+	b3DestroyRecording( lifted );
+
+	b3Recording* rec = RecordLiftedExplosion( 0.0f );
+	ENSURE( rec != NULL );
+	const uint8_t* data = b3Recording_GetData( rec );
+	int size = b3Recording_GetSize( rec );
+	ENSURE( size >= (int)sizeof( b3RecHeader ) );
+
+	b3RecHeader header;
+	memcpy( &header, data, sizeof( header ) );
+	int cursor = (int)( sizeof( b3RecHeader ) + header.snapshotSize );
+	int streamEnd = (int)header.registryOffset;
+
+	// Walk the records (opcode, u24 payload size, payload) to the explosion
+	int explodeAt = -1;
+	int payloadSize = 0;
+	while ( cursor + 4 <= streamEnd )
+	{
+		payloadSize = data[cursor + 1] | ( data[cursor + 2] << 8 ) | ( data[cursor + 3] << 16 );
+		if ( data[cursor] == b3_recOpWorldExplode )
+		{
+			explodeAt = cursor;
+			break;
+		}
+		cursor += 4 + payloadSize;
+	}
+	ENSURE( explodeAt >= 0 );
+
+	// The lift is the record's last field and was recorded as zero
+	int fieldAt = explodeAt + 4 + payloadSize - 4;
+	float recordedLift = 1.0f;
+	memcpy( &recordedLift, data + fieldAt, sizeof( float ) );
+	ENSURE( recordedLift == 0.0f );
+
+	// Cut it out, shrink the record and pull the registry back to match
+	int legacySize = size - 4;
+	uint8_t* legacy = (uint8_t*)b3Alloc( (size_t)legacySize );
+	memcpy( legacy, data, (size_t)fieldAt );
+	memcpy( legacy + fieldAt, data + fieldAt + 4, (size_t)( size - fieldAt - 4 ) );
+	int legacyPayload = payloadSize - 4;
+	legacy[explodeAt + 1] = (uint8_t)legacyPayload;
+	legacy[explodeAt + 2] = (uint8_t)( legacyPayload >> 8 );
+	legacy[explodeAt + 3] = (uint8_t)( legacyPayload >> 16 );
+	header.registryOffset -= 4;
+	memcpy( legacy, &header, sizeof( header ) );
+
+	ENSURE( b3ValidateReplay( legacy, legacySize, 1 ) );
+
+	b3Free( legacy, (size_t)legacySize );
+	b3DestroyRecording( rec );
+	return 0;
+}
+
 int RecordingTest( void )
 {
 	RUN_SUBTEST( GeometryHashCollision );
@@ -3822,6 +3918,7 @@ int RecordingTest( void )
 	RUN_SUBTEST( TransformedHullRoundTrip );
 	RUN_SUBTEST( GeometryMutatorReplay );
 	RUN_SUBTEST( AllOps );
+	RUN_SUBTEST( ExplosionLiftReplay );
 	RUN_SUBTEST( FluidRoundTrip );
 	RUN_SUBTEST( FluidMidStream );
 	RUN_SUBTEST( FluidReplayWorldSlot );

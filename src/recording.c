@@ -318,7 +318,7 @@ static void b3RecW_STR( b3RecBuffer* buf, const char* s )
 // stay field-for-field in sync. Add a field to a def and the size changes, firing the matching assert
 // so the writer and reader both get updated. Only enforced on the 64-bit target; each def lists the
 // single-precision and double-precision sizes (equal for most), so either build configuration passes.
-_Static_assert( sizeof( void* ) != 8 || sizeof( b3ExplosionDef ) == 32 || sizeof( b3ExplosionDef ) == 48,
+_Static_assert( sizeof( void* ) != 8 || sizeof( b3ExplosionDef ) == 40 || sizeof( b3ExplosionDef ) == 48,
 				"b3ExplosionDef changed: update b3RecW_EXPLOSIONDEF and b3RecR_EXPLOSIONDEF together" );
 _Static_assert( sizeof( void* ) != 8 || sizeof( b3BodyDef ) == 112 || sizeof( b3BodyDef ) == 128,
 				"b3BodyDef changed: update b3RecW_BODYDEF and b3RecR_BODYDEF together" );
@@ -358,6 +358,7 @@ void b3RecW_EXPLOSIONDEF( b3RecBuffer* buf, b3ExplosionDef v )
 	b3RecW_F32( buf, v.radius );
 	b3RecW_F32( buf, v.falloff );
 	b3RecW_F32( buf, v.impulsePerArea );
+	b3RecW_F32( buf, v.upwardsModifier );
 }
 
 void b3RecW_BODYDEF( b3RecBuffer* buf, b3BodyDef v )

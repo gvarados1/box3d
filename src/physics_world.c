@@ -3483,6 +3483,7 @@ typedef struct ExplosionContext
 	float radius;
 	float falloff;
 	float impulsePerArea;
+	float upwardsModifier;
 } ExplosionContext;
 
 static bool ExplosionCallback( int proxyId, uint64_t userData, void* context )
@@ -3539,6 +3540,13 @@ static bool ExplosionCallback( int proxyId, uint64_t userData, void* context )
 	}
 
 	b3Vec3 direction = b3Sub( closestPoint, localPosition );
+	if ( explosionContext->upwardsModifier != 0.0f )
+	{
+		// Aim from the lowered center: closestPoint - ( localPosition - lift )
+		b3Vec3 lift = { 0.0f, explosionContext->upwardsModifier, 0.0f };
+		direction = b3Add( direction, b3InvRotateVector( xf.q, lift ) );
+	}
+
 	if ( b3LengthSquared( direction ) > 100.0f * FLT_EPSILON * FLT_EPSILON )
 	{
 		direction = b3Normalize( direction );
@@ -3578,11 +3586,13 @@ void b3World_Explode( b3WorldId worldId, const b3ExplosionDef* explosionDef )
 	float radius = explosionDef->radius;
 	float falloff = explosionDef->falloff;
 	float impulsePerArea = explosionDef->impulsePerArea;
+	float upwardsModifier = explosionDef->upwardsModifier;
 
 	B3_ASSERT( b3IsValidPosition( position ) );
 	B3_ASSERT( b3IsValidFloat( radius ) && radius >= 0.0f );
 	B3_ASSERT( b3IsValidFloat( falloff ) && falloff >= 0.0f );
 	B3_ASSERT( b3IsValidFloat( impulsePerArea ) );
+	B3_ASSERT( b3IsValidFloat( upwardsModifier ) );
 
 	b3World* world = b3GetUnlockedWorldFromId( worldId );
 	if ( world == NULL )
@@ -3595,7 +3605,7 @@ void b3World_Explode( b3WorldId worldId, const b3ExplosionDef* explosionDef )
 	// Locked due to waking
 	world->locked = true;
 
-	struct ExplosionContext explosionContext = { world, position, radius, falloff, impulsePerArea };
+	struct ExplosionContext explosionContext = { world, position, radius, falloff, impulsePerArea, upwardsModifier };
 
 	// The broad-phase tree is float, so translate a local query box out to world with outward rounding
 	float extent = radius + falloff;
